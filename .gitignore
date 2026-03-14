@@ -1,0 +1,13 @@
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dist/
+.env
+.DS_Store
+
+# IDE / Editor
+.vscode/
+.idea/
+*.imlø
