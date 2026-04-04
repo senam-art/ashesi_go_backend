@@ -8,4 +8,6 @@ router.post('/scan-bus', passengerController.recordStudentSelfScan);
 // This lets the student see their previous trips
 router.get('/history/:studentId', passengerController.getStudentHistory);
 
+router.get('/balance', passengerController.getBalance);
+
 module.exports = router;

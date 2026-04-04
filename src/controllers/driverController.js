@@ -1,6 +1,9 @@
-const supabase = require('../config/supabase');
 
-const getDashboard = async (req, res) => {
+const supabase = require('../config/supabase');
+const journeyService = require('../services/journeyService');
+
+
+const getRoutes = async (req, res) => {
     try {
         const { data: routes, error } = await supabase
             .from('routes')
@@ -28,8 +31,8 @@ const startJourney = async (req, res) => {
         // 1. Check: Does the vehicle exist?
         const { data: vehicle, error: vError } = await supabase
             .from('vehicles')
-            .select('id, license_plate')
-            .eq('id', vehicleId)
+            .select('vehicle_id, license_plate')
+            .eq('vehicle_id', vehicleId)
             .single();
 
         if (vError || !vehicle) {
@@ -89,6 +92,102 @@ const startJourney = async (req, res) => {
     } catch (err) {
         res.status(500).json({ error: "Internal Server Error", details: err.message });
     }
-    };
+};
+    
+const getActiveJourneys = async (req, res) => {
+    try {
+        const { data: active_journeys, error } = await supabase
+            .from('active_journeys')
+            .select('*');
+        
+        if (error) throw error;
 
-module.exports = { getDashboard, startJourney };
+        //Send data back as JSON
+        res.status(200).json(active_journeys);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+}
+
+const getRouteData = async (req, res) => {
+    // 1. Get the active journey ID from the request 
+    const { actJouId } = req.body
+    try {
+        //Check if journey is active AND get the route_id in one go
+        const { data: activeJourneyData, error: ajError } = await supabase
+            .from('active_journeys')
+            .select('act_jou_id,route_id,routes(route_name)')
+            .eq('act_jou_id', actJouId)
+            .single();
+        
+        if (ajError || !activeJourneyData) {
+            return res.status(400).json({ error: "Active Journey not found" });
+        }
+
+
+        // 2. Get bus stops
+        //use route id to query
+        const { data: busStops, error: bError } = await supabase
+            .from('route_structure')
+            .select(`stop_order, scheduled_arrival, bus_stops(bus_stop_id,bus_stop_name,latitude,longitude)`)
+            .eq('route_id', activeJourneyData.route_id)
+            .order('stop_order', { ascending: true });
+        
+  
+        
+        if (bError) {
+            return res.status(500).json({ error: bError.message });
+        }
+
+       
+
+        return res.json({
+            status: "Success",route_name:activeJourneyData.routes.route_name, act_jou_id: actJouId, stops: busStops
+        })
+    }
+
+
+
+    catch (error) {
+        return res.status(500).json({ error: error.message })
+    }
+   
+
+};
+
+
+
+const getJourneyData = async (req, res) => {
+    const { actJouId } = req.body;
+
+    try {
+        if (!actJouId) {
+            return res.status(400).json({ status: "Error", message: "actJouId required" });
+        }
+
+        // The Service does all the DB and Google work
+        const data = await journeyService.getRouteWithCache(actJouId);
+
+        return res.json({
+            status: "Success",
+            ...data
+        });
+    } catch (error) {
+        console.error("Controller Error:", error.message);
+        return res.status(500).json({ status: "Error", message: error.message });
+    }
+};
+
+module.exports = { getJourneyData };
+
+
+
+
+module.exports = {
+    getRoutes,
+    startJourney,
+    getActiveJourneys,
+    getRouteData,
+    getJourneyData
+
+};

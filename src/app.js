@@ -9,9 +9,12 @@ app.use(express.json());
 
 // Routes
 app.use('/api/driver', driverRoutes);
-app.use('/api/passenger', passengerRoutes);
+// app.use('/api/passenger', passengerRoutes);
 
 // Simple Health Check
 app.get('/health', (req, res) => res.send('System Healthy 🚀'));
 
 module.exports = app;
+
+//live tracking of bus info to other drivers- 
+//available seats
