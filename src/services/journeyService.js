@@ -7,7 +7,7 @@ const getRouteWithCache = async (actJouId) => {
         .from('active_journeys')
         .select(`
             act_jou_id, 
-            route_id, 
+            id, 
             routes (
                 id, 
                 route_name, 
