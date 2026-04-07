@@ -1,15 +1,15 @@
 const axios = require('axios');
-const supabase = require('../config/supabase');
+const { supabaseAdmin } = require('../config/supabase');
 
 const getRouteWithCache = async (actJouId) => {
     // Fetch Journey and join the Master Route data
-    const { data: activeJourney, error: ajError } = await supabase
+    const { data: activeJourney, error: ajError } = await supabaseAdmin
         .from('active_journeys')
         .select(`
             act_jou_id, 
             route_id, 
             routes (
-                route_id, 
+                id, 
                 route_name, 
                 encoded_polyline, 
                 polyline_fetched_at
@@ -24,7 +24,7 @@ const getRouteWithCache = async (actJouId) => {
     const targetRouteId = activeJourney.route_id;
 
     // 2. Fetch the Bus Stops
-    const { data: stops, error: sError } = await supabase
+    const { data: stops, error: sError } = await supabaseAdmin
         .from('route_structure')
         .select(`
             stop_order, 
