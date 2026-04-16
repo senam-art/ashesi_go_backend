@@ -10,6 +10,7 @@ const passengerController = require('../controllers/passengerController');
 
 router.get('/balance', passengerController.getBalance);
 router.post('/board', passengerController.processBoarding);
+router.get('/daily-upcoming-trips', passengerController.getDailyUpcomingTrips);
 
 
 module.exports = router;

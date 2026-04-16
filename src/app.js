@@ -4,6 +4,7 @@ const authRoutes = require('./routes/authRoutes');
 const driverRoutes = require('./routes/driverRoutes');
 const passengerRoutes = require('./routes/passengerRoutes'); 
 const paymentRoutes = require('./routes/paymentRoutes');
+const systemRoutes = require('./routes/systemRoutes');
 
 const app = express();
 
@@ -14,7 +15,8 @@ app.use(express.json());
 app.use('/api/auth', authRoutes); 
 app.use('/api/driver', driverRoutes);
 app.use('/api/passenger', passengerRoutes);
-app.use('/api/payment',paymentRoutes);
+app.use('/api/payment', paymentRoutes);
+app.use('/api/scheduler', systemRoutes)
 
 // Simple Health Check
 app.get('/health', (req, res) => res.send('System Healthy 🚀'));

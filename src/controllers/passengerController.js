@@ -4,14 +4,14 @@ const { supabaseAdmin } = require('../config/supabase');
 
 
 const getBalance = async (req, res) => {
-     const { userId } = req.query;
+  const { userId } = req.query;
 
-        if (!userId) {
-            return res.status(400).json({ error: "User ID is required" });
-        }
-    
-    try {
-        // 1. Fetch from Supabase
+  if (!userId) {
+    return res.status(400).json({ error: "User ID is required" });
+  }
+
+  try {
+    // 1. Fetch from Supabase
     const { data, error } = await supabase
       .from('wallets')
       .select('balance')
@@ -21,15 +21,15 @@ const getBalance = async (req, res) => {
     if (error) throw error;
 
     // 2. Send clean JSON back to the Flutter app
-    res.status(200).json({ 
+    res.status(200).json({
       success: true,
-      balance: data.balance 
+      balance: data.balance
     });
-       
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-        
-    }
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+
+  }
 }
 
 
@@ -56,15 +56,15 @@ const processBoarding = async (req, res) => {
         )
       `)
       .eq('vehicle_id', vehicleId)
-      .eq('status', 'ONGOING') 
+      .eq('status', 'ONGOING')
       .single();
 
     // If jError exists, log it to the console so you can see exactly what Supabase says
     if (jError || !journey) {
       console.error("Supabase Query Error:", jError);
-      return res.status(404).json({ 
-        success: false, 
-        message: "This bus is not currently on an active journey." 
+      return res.status(404).json({
+        success: false,
+        message: "This bus is not currently on an active journey."
       });
     }
 
@@ -74,46 +74,101 @@ const processBoarding = async (req, res) => {
 
     // 2. Execute Transaction
     const { data: newBalance, error: rpcError } = await supabaseAdmin.rpc('handle_boarding_transaction', {
-    p_passenger_id: passengerId,
-    p_journey_id: journey.act_jou_id,
-    p_fare: fare
+      p_passenger_id: passengerId,
+      p_journey_id: journey.act_jou_id,
+      p_fare: fare
     });
 
     if (rpcError) {
-  if (rpcError.message.includes('Overdraft')) {
-    return res.status(402).json({ 
-      success: false, 
-      message: "Overdraft limit reached (GHS 50). Please top up to ride again." 
-    });
-  }
-  throw rpcError;
-}
-        /// 3. Logic for the Debt Warning
+      if (rpcError.message.includes('Overdraft')) {
+        return res.status(402).json({
+          success: false,
+          message: "Overdraft limit reached (GHS 50). Please top up to ride again."
+        });
+      }
+      throw rpcError;
+    }
+    /// 3. Logic for the Debt Warning
     let warning = null;
     if (newBalance < 0) {
-    warning = `Warning: Your balance is GHS ${newBalance.toFixed(2)}. Please top up your wallet soon! ⚠️`;
+      warning = `Warning: Your balance is GHS ${newBalance.toFixed(2)}. Please top up your wallet soon! ⚠️`;
     }
 
     // 4. Success Response
     res.status(200).json({
-    success: true,
-        message: `Boarded: ${routeDisplayName}
+      success: true,
+      message: `Boarded: ${routeDisplayName}
     `,
-    warning: warning, // This will be null if they have money, or a string if they don't
-    details: {
+      warning: warning, // This will be null if they have money, or a string if they don't
+      details: {
         fare_deducted: fare,
         remaining_balance: newBalance,
         journey_id: journey.act_jou_id
-    }
-});
-      
+      }
+    });
+
   } catch (error) {
     console.error("Boarding Error:", error.message);
-    res.status(500).json({ 
-      success: false, 
-      message: "An internal error occurred during boarding." 
+    res.status(500).json({
+      success: false,
+      message: "An internal error occurred during boarding."
     });
   }
 
 };
-module.exports = { getBalance, processBoarding  };
+
+const getDailyUpcomingTrips = async (req, res) => {
+  try {
+    
+    // This forces the server to evaluate the date in GMT, no matter where it is hosted.
+    const todayPostgres = new Date().getUTCDay(); 
+
+    // DEBUG: Log what we are looking for
+    console.log(`Fetching active schedules for day_of_week: ${todayPostgres}`);
+
+    // 1. Fetch from Supabase, joining the routes table
+    const { data: trips, error: fetchError } = await supabaseAdmin
+      .from('recurring_schedules')
+      .select(`
+        schedule_id,
+        departure_time,
+        vehicle_id,
+        routes (
+          id,
+          name,
+          start_location,
+          end_location
+        )
+      `)
+      .eq('day_of_week', todayPostgres)
+      .eq('is_active', true)
+      .order('departure_time', { ascending: true }); // Earliest trips first
+
+    // 2. Handle Supabase Errors
+    if (fetchError) {
+      console.error("Supabase Query Error (getUpcomingTrips):", fetchError);
+      return res.status(500).json({ 
+        success: false, 
+        message: "Database error occurred while fetching schedules." 
+      });
+    }
+
+    // 3. Success Response
+    res.status(200).json({
+      success: true,
+      message: `Found ${trips.length} scheduled trips for today.`,
+      data: trips
+    });
+
+  } catch (error) {
+    console.error("Upcoming Trips Error:", error.message);
+    res.status(500).json({ 
+      success: false, 
+      message: "An internal server error occurred while fetching trips." 
+    });
+  }
+};
+
+
+
+module.exports = { getBalance, processBoarding, getDailyUpcomingTrips};

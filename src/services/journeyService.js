@@ -74,17 +74,17 @@ const getRouteWithCache = async (actJouId) => {
             const routeInfo = response.data.routes[0];
             finalPolyline = routeInfo.polyline.encodedPolyline;
 
-            // 4. THE FIX: Targeting 'route_id' specifically
+            // DB update with data fetched from Google API
             const { error: updateError } = await supabase
                 .from('routes')
                 .update({ 
                     encoded_polyline: finalPolyline, 
                     polyline_fetched_at: new Date().toISOString(),
-                    // Optional: Store distance/duration too since you have the columns!
+                    //  Store distance/duration 
                     route_distance_meters: routeInfo.distanceMeters,
                     route_duration_seconds: parseInt(routeInfo.duration.replace('s', ''))
                 })
-                .eq('route_id', targetRouteId); // Matching your routes_pkey
+                .eq('route_id', targetRouteId); a
 
             if (updateError) {
                 console.error("Update failed:", updateError.message);
@@ -103,4 +103,61 @@ const getRouteWithCache = async (actJouId) => {
     };
 };
 
-module.exports = { getRouteWithCache };
+
+const getUpcomingTrips = async (req, res) => {
+  try {
+    let targetDayPostgres;
+
+    // 1. Check if Flutter sent a specific day in the URL (e.g., ?day=3)
+    if (req.query.day) {
+      const dartDay = parseInt(req.query.day, 10);
+      
+      if (isNaN(dartDay) || dartDay < 1 || dartDay > 7) {
+        return res.status(400).json({ success: false, message: "Invalid day parameter. Must be 1-7." });
+      }
+
+      //  TRANSLATION LOGIC:
+      // Dart: Monday=1, ..., Saturday=6, Sunday=7
+      // Postgres: Sunday=0, Monday=1, ..., Saturday=6
+      targetDayPostgres = dartDay === 7 ? 0 : dartDay; 
+      
+      console.log(`Fetching trips for requested Dart day ${dartDay} (Postgres day ${targetDayPostgres})`);
+    } else {
+      // 2. Default fallback: If no day provided, use today's GMT day
+      targetDayPostgres = new Date().getUTCDay();
+      console.log(`No day provided. Defaulting to today GMT (Postgres day ${targetDayPostgres})`);
+    }
+
+    // 3. Fetch from Supabase
+    const { data: trips, error: fetchError } = await supabaseAdmin
+      .from('recurring_schedules')
+      .select(`
+        schedule_id,
+        departure_time,
+        vehicle_id,
+        routes (
+          id,
+          name,
+          start_location,
+          end_location
+        )
+      `)
+      .eq('day_of_week', targetDayPostgres) 
+      .eq('is_active', true)
+      .order('departure_time', { ascending: true });
+
+    if (fetchError) {
+      console.error("Supabase Query Error:", fetchError);
+      return res.status(500).json({ success: false, message: "Database error fetching schedules." });
+    }
+
+    res.status(200).json({ success: true, data: trips });
+
+  } catch (error) {
+    console.error("Upcoming Trips Error:", error.message);
+    res.status(500).json({ success: false, message: "Internal server error." });
+  }
+};
+
+
+module.exports = { getRouteWithCache, getUpcomingTrips};
