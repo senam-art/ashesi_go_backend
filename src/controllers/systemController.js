@@ -65,7 +65,6 @@ const busArrivalNotification = async (req, res) => {
         // a broken notification.
         return res.status(200).send("FCM Failed but Webhook received.");
     }
-
 };
 
 

@@ -347,6 +347,71 @@ const recordStopVisit = async (req, res) => {
     }
 };
 
+
+const getJourneyStatus = async (req, res) => {
+    const { actJouId } = req.params;
+
+    try {
+        // 1. Get the Active Journey & Route Info
+        const { data: journey, error: jError } = await supabaseAdmin
+            .from('active_journeys')
+            .select(`
+                *,
+                routes (route_name, capacity)
+            `)
+            .eq('act_jou_id', actJouId)
+            .single();
+
+        if (jError) throw jError;
+
+        // 2. Get the full Route Structure 
+        const { data: structure, error: sError } = await supabaseAdmin
+            .from('route_structure')
+            .select(`
+                stop_order,
+                scheduled_arrival,
+                bus_stops (bus_stop_id, bus_stop_name)
+            `)
+            .eq('route_id', journey.route_id)
+            .order('stop_order', { ascending: true });
+
+        // 3. Get existing visits (The "History")
+        const { data: visits } = await supabaseAdmin
+            .from('stop_visit_summaries')
+            .select('stop_id, arrival_time, is_delayed')
+            .eq('active_journey_id', actJouId);
+
+        // 4. Combine them: Mark which stops are finished
+        const busStops = structure.map(s => {
+            const visit = visits.find(v => v.stop_id === s.bus_stops.bus_stop_id);
+            return {
+                id: s.bus_stops.bus_stop_id,
+                name: s.bus_stops.bus_stop_name,
+                stopOrder: s.stop_order,
+                scheduledArrival: s.scheduled_arrival,
+                actualArrival: visit ? visit.arrival_time : null,
+                isDelayed: visit ? visit.is_delayed : false,
+                status: visit ? 'completed' : 'upcoming'
+            };
+        });
+
+        // 5. Determine the current stop index
+        // It's the first stop that hasn't been visited yet
+        const currentStopIndex = busStops.findIndex(s => s.actualArrival === null);
+
+        return res.status(200).json({
+            routeName: journey.routes.route_name,
+            capacity: journey.routes.capacity,
+            currentStopIndex: currentStopIndex === -1 ? busStops.length - 1 : currentStopIndex,
+            isCompleted: currentStopIndex === -1,
+            busStops
+        });
+
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+};
+
 module.exports = {
     getRoutes,
     startJourney,
@@ -354,6 +419,7 @@ module.exports = {
     getRouteData,
     getJourneyData,
     getTodaySchedule,
-    recordStopVisit
+    recordStopVisit,
+    getJourneyStatus
 
 };

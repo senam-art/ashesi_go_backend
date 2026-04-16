@@ -10,7 +10,8 @@ router.get('/active-journeys', driverController.getActiveJourneys)
 router.post('/route-data', driverController.getRouteData)
 router.post('/journey-data', driverController.getJourneyData)
 router.get('/schedule/today', driverController.getTodaySchedule)
-router.post('/journey/record-stop',driverController.recordStopVisit)
+router.post('/journey/record-stop', driverController.recordStopVisit)
+router.get('/journey/status',driverController.getJourneyStatus)
 
 
 
