@@ -348,11 +348,14 @@ const recordStopVisit = async (req, res) => {
 };
 
 
+/**
+ * Fetches the current state of a journey, merging the route plan with visit history.
+ */
 const getJourneyStatus = async (req, res) => {
     const { actJouId } = req.params;
 
     try {
-        // 1. Get Journey Info (Including encoded_polyline from routes)
+        // 1. Get Journey Info (Pulling capacity and passenger count from active_journeys)
         const { data: journey, error: jError } = await supabaseAdmin
             .from('active_journeys')
             .select(`
@@ -366,9 +369,12 @@ const getJourneyStatus = async (req, res) => {
             .eq('act_jou_id', actJouId)
             .single();
 
-        if (jError || !journey) throw new Error("Journey record not found");
+        if (jError || !journey) {
+            console.error("Supabase Journey Error:", jError);
+            return res.status(404).json({ error: "Journey record not found" });
+        }
 
-        // 2. Get the Route Structure (The Plan)
+        // 2. Get the full Route Structure (The "Plan")
         const { data: structure, error: sError } = await supabaseAdmin
             .from('route_structure')
             .select(`
@@ -379,15 +385,23 @@ const getJourneyStatus = async (req, res) => {
             .eq('route_id', journey.route_id)
             .order('stop_order', { ascending: true });
 
-        if (sError) throw sError;
+        if (sError) {
+            console.error("Supabase Structure Error:", sError);
+            throw sError;
+        }
 
-        // 3. Get existing visits (The History)
-        const { data: visits } = await supabaseAdmin
+        // 3. Get existing visits (The "History")
+        const { data: visits, error: vError } = await supabaseAdmin
             .from('stop_visit_summaries')
             .select('stop_id, arrival_time, is_delayed')
             .eq('active_journey_id', actJouId);
 
-        // 4. Map the stops to match your Flutter BusStop model
+        if (vError) {
+            console.error("Supabase Visits Error:", vError);
+            throw vError;
+        }
+
+        // 4. Map the stops: Combine the Plan with the History
         const stops = structure.map(s => {
             const visit = visits.find(v => v.stop_id === s.bus_stops.bus_stop_id);
             return {
@@ -400,7 +414,11 @@ const getJourneyStatus = async (req, res) => {
             };
         });
 
-        // 5. Build the response with keys matching your Flutter RouteData.fromJson
+        // 5. Calculate the current position
+        // Finds the index of the first stop that hasn't been visited yet
+        const nextStop = stops.findIndex(s => s.actual_arrival === null);
+
+        // 6. Final Unified Response
         return res.status(200).json({
             act_jou_id: journey.act_jou_id,
             route_name: journey.routes.route_name,
@@ -408,12 +426,14 @@ const getJourneyStatus = async (req, res) => {
             passenger_count: journey.current_passenger_count,
             capacity: journey.current_capacity,
             encoded_polyline: journey.routes.encoded_polyline,
-            stops: stops // ✨ Flutter is looking for 'stops'
+            // If all stops are visited, indexWhere returns -1; we default to the last stop
+            current_stop_index: nextStop === -1 ? stops.length - 1 : nextStop,
+            stops: stops
         });
 
     } catch (error) {
         console.error("Status Lookup Error:", error);
-        res.status(500).json({ error: error.message });
+        return res.status(500).json({ error: error.message });
     }
 };
 
