@@ -352,19 +352,25 @@ const getJourneyStatus = async (req, res) => {
     const { actJouId } = req.params;
 
     try {
-        // 1. Get the Active Journey & Route Info
-        const { data: journey, error: jError } = await supabaseAdmin
+        // 1. Get Journey Info with EXACT SQL column names
+      const { data: journey, error: jError } = await supabaseAdmin
             .from('active_journeys')
             .select(`
-                *,
-                routes (route_name, capacity)
+                act_jou_id,
+                route_id,
+                current_capacity,
+                current_passenger_count,
+                routes (route_name)
             `)
             .eq('act_jou_id', actJouId)
             .single();
+        // Debugging tip: If it still fails, log the specific jError
+        if (jError) {
+            console.error("Supabase Query Error:", jError);
+            throw new Error("Journey record could not be retrieved.");
+        }
 
-        if (jError) throw jError;
-
-        // 2. Get the full Route Structure 
+        // 2. Get the full Route Structure
         const { data: structure, error: sError } = await supabaseAdmin
             .from('route_structure')
             .select(`
@@ -375,13 +381,15 @@ const getJourneyStatus = async (req, res) => {
             .eq('route_id', journey.route_id)
             .order('stop_order', { ascending: true });
 
-        // 3. Get existing visits (The "History")
+        if (sError) throw sError;
+
+        // 3. Get existing visits
         const { data: visits } = await supabaseAdmin
             .from('stop_visit_summaries')
             .select('stop_id, arrival_time, is_delayed')
             .eq('active_journey_id', actJouId);
 
-        // 4. Combine them: Mark which stops are finished
+        // 4. Merge Logic
         const busStops = structure.map(s => {
             const visit = visits.find(v => v.stop_id === s.bus_stops.bus_stop_id);
             return {
@@ -395,19 +403,20 @@ const getJourneyStatus = async (req, res) => {
             };
         });
 
-        // 5. Determine the current stop index
-        // It's the first stop that hasn't been visited yet
-        const currentStopIndex = busStops.findIndex(s => s.actualArrival === null);
-
+        // 5. Calculate current position (first stop without an actualArrival)
+        const firstUnvisitedIndex = busStops.findIndex(s => s.actualArrival === null);
+        
         return res.status(200).json({
             routeName: journey.routes.route_name,
-            capacity: journey.routes.capacity,
-            currentStopIndex: currentStopIndex === -1 ? busStops.length - 1 : currentStopIndex,
-            isCompleted: currentStopIndex === -1,
+            capacity: journey.current_capacity,           // Mapping back to Flutter-friendly keys
+            passengerCount: journey.current_passenger_count,
+            currentStopIndex: firstUnvisitedIndex === -1 ? busStops.length - 1 : firstUnvisitedIndex,
+            isCompleted: firstUnvisitedIndex === -1,
             busStops
         });
 
     } catch (error) {
+        console.error("Status Lookup Error:", error);
         res.status(500).json({ error: error.message });
     }
 };
