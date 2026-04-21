@@ -437,6 +437,32 @@ const getJourneyStatus = async (req, res) => {
     }
 };
 
+const updateLiveLocation = async (req, res) => {
+    const { actJouId, lat, lng, heading } = req.body;
+
+    try {
+        // 1. Update the Journey's current location
+        const { error: updateError } = await supabaseAdmin
+            .from('active_journeys')
+            .update({
+                last_known_lat: lat,
+                last_known_lng: lng,
+                // heading: heading // If you added this column
+            })
+            .eq('act_jou_id', actJouId);
+
+        if (updateError) throw updateError;
+
+        // 2. (Optional) Simple Geofencing Check
+        // You could trigger a check here to see if (lat, lng) is within 50m
+        // of the NEXT stop in the route_structure.
+
+        return res.status(200).json({ success: true });
+    } catch (error) {
+        return res.status(500).json({ error: error.message });
+    }
+};
+
 module.exports = {
     getRoutes,
     startJourney,
