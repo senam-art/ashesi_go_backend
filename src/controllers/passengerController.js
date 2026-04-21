@@ -1,17 +1,12 @@
-const supabase = require('../config/supabase');
+const crypto = require('crypto');
+const { supabase, supabaseAdmin } = require('../config/supabase');
 
-const { supabaseAdmin } = require('../config/supabase');
-
-
+// --- GET /passenger/balance?userId=... -----------------------------------
 const getBalance = async (req, res) => {
   const { userId } = req.query;
-
-  if (!userId) {
-    return res.status(400).json({ error: "User ID is required" });
-  }
+  if (!userId) return res.status(400).json({ error: 'User ID is required' });
 
   try {
-    // 1. Fetch from Supabase
     const { data, error } = await supabase
       .from('wallets')
       .select('balance')
@@ -19,156 +14,322 @@ const getBalance = async (req, res) => {
       .single();
 
     if (error) throw error;
-
-    // 2. Send clean JSON back to the Flutter app
-    res.status(200).json({
-      success: true,
-      balance: data.balance
-    });
-
+    return res.status(200).json({ success: true, balance: data.balance });
   } catch (error) {
-    res.status(500).json({ error: error.message });
-
+    return res.status(500).json({ error: error.message });
   }
-}
+};
 
-
-
-
-
-
+// --- POST /passenger/board ------------------------------------------------
+// body: { vehicleId, passengerId, dropOffStopId, payForUsername? }
+// If payForUsername is set, the caller is paying for someone else.
 const processBoarding = async (req, res) => {
-  const { vehicleId, passengerId } = req.body;
+  const { vehicleId, passengerId, dropOffStopId, payForUsername } = req.body;
+
+  if (!vehicleId || !passengerId) {
+    return res
+      .status(400)
+      .json({ success: false, message: 'vehicleId and passengerId required.' });
+  }
 
   try {
-    // DEBUG: Log what we are looking for
-    console.log(`Searching for active journey. Bus: ${vehicleId}, Status: ONGOING`);
-
-    // 1. Resolve: Find the ONGOING journey for this specific Bus
+    // 1. Find the ONGOING journey for this vehicle.
     const { data: journey, error: jError } = await supabaseAdmin
       .from('active_journeys')
       .select(`
-        act_jou_id, 
+        act_jou_id,
         route_id,
-        routes (
-          route_name, 
-          fare
-        )
+        routes ( route_name, fare )
       `)
       .eq('vehicle_id', vehicleId)
       .eq('status', 'ONGOING')
-      .single();
+      .maybeSingle();
 
-    // If jError exists, log it to the console so you can see exactly what Supabase says
     if (jError || !journey) {
-      console.error("Supabase Query Error:", jError);
-      return res.status(404).json({
-        success: false,
-        message: "This bus is not currently on an active journey."
-      });
+      console.error('Boarding journey lookup error:', jError);
+      return res
+        .status(404)
+        .json({ success: false, message: 'This bus is not currently on an active journey.' });
     }
 
-    // FIX: Using 'route_name' and the correct 'act_jou_id'
     const fare = journey.routes.fare;
     const routeDisplayName = journey.routes.route_name;
 
-    // 2. Execute Transaction
-    const { data: newBalance, error: rpcError } = await supabaseAdmin.rpc('handle_boarding_transaction', {
-      p_passenger_id: passengerId,
-      p_journey_id: journey.act_jou_id,
-      p_fare: fare
-    });
+    // 2. If a drop-off stop was provided, validate it's on this route and still
+    //    ahead of the bus.
+    if (dropOffStopId) {
+      const { data: rs, error: rsErr } = await supabaseAdmin
+        .from('route_structure')
+        .select('stop_order')
+        .eq('route_id', journey.route_id)
+        .eq('bus_stop_id', dropOffStopId)
+        .maybeSingle();
 
-    if (rpcError) {
-      if (rpcError.message.includes('Overdraft')) {
-        return res.status(402).json({
-          success: false,
-          message: "Overdraft limit reached (GHS 50). Please top up to ride again."
-        });
+      if (rsErr || !rs) {
+        return res
+          .status(400)
+          .json({ success: false, message: 'That stop is not part of this route.' });
       }
-      throw rpcError;
-    }
-    /// 3. Logic for the Debt Warning
-    let warning = null;
-    if (newBalance < 0) {
-      warning = `Warning: Your balance is GHS ${newBalance.toFixed(2)}. Please top up your wallet soon! ⚠️`;
     }
 
-    // 4. Success Response
-    res.status(200).json({
+    // 3. Resolve friend-pay target if requested.
+    let riderId = passengerId;
+    if (payForUsername) {
+      const u = String(payForUsername).trim().toLowerCase();
+      const { data: friend, error: fErr } = await supabaseAdmin
+        .from('profiles')
+        .select('id')
+        .eq('username', u)
+        .maybeSingle();
+      if (fErr) throw fErr;
+      if (!friend) {
+        return res
+          .status(404)
+          .json({ success: false, message: `No passenger with username @${u}.` });
+      }
+      if (friend.id === passengerId) {
+        return res
+          .status(400)
+          .json({ success: false, message: "You can't friend-pay yourself." });
+      }
+      riderId = friend.id;
+    }
+
+    // 4. Execute the correct RPC.
+    let newBalance;
+    if (riderId === passengerId) {
+      const { data, error: rpcError } = await supabaseAdmin.rpc('handle_boarding_transaction', {
+        p_passenger_id: passengerId,
+        p_journey_id: journey.act_jou_id,
+        p_fare: fare,
+        p_drop_off_stop_id: dropOffStopId || null,
+      });
+      if (rpcError) {
+        if ((rpcError.message || '').includes('Overdraft')) {
+          return res.status(402).json({
+            success: false,
+            message: 'Overdraft limit reached (GHS 50). Please top up to ride again.',
+          });
+        }
+        throw rpcError;
+      }
+      newBalance = data;
+    } else {
+      const { data, error: rpcError } = await supabaseAdmin.rpc(
+        'handle_friend_boarding_transaction',
+        {
+          p_payer_id: passengerId,
+          p_rider_id: riderId,
+          p_journey_id: journey.act_jou_id,
+          p_fare: fare,
+          p_drop_off_stop_id: dropOffStopId || null,
+        }
+      );
+      if (rpcError) {
+        if ((rpcError.message || '').includes('Overdraft')) {
+          return res.status(402).json({
+            success: false,
+            message: 'Overdraft limit reached (GHS 50). Please top up to ride again.',
+          });
+        }
+        throw rpcError;
+      }
+      newBalance = data;
+    }
+
+    const warning =
+      newBalance < 0
+        ? `Warning: Your balance is GHS ${Number(newBalance).toFixed(2)}. Please top up your wallet soon.`
+        : null;
+
+    return res.status(200).json({
       success: true,
-      message: `Boarded: ${routeDisplayName}
-    `,
-      warning: warning, // This will be null if they have money, or a string if they don't
+      message: `Boarded: ${routeDisplayName}`,
+      warning,
       details: {
         fare_deducted: fare,
         remaining_balance: newBalance,
-        journey_id: journey.act_jou_id
-      }
+        journey_id: journey.act_jou_id,
+        paid_for: riderId === passengerId ? null : riderId,
+      },
     });
-
   } catch (error) {
-    console.error("Boarding Error:", error.message);
-    res.status(500).json({
+    console.error('Boarding error:', error.message || error);
+    return res.status(500).json({
       success: false,
-      message: "An internal error occurred during boarding."
+      message: 'An internal error occurred during boarding.',
     });
   }
-
 };
 
+// Internal helper — given a resolved active_journey, build the drop-off
+// picker payload.
+async function _stopsAheadPayload(journey) {
+  const { data: structure, error: sErr } = await supabaseAdmin
+    .from('route_structure')
+    .select(`
+      stop_order,
+      scheduled_arrival,
+      bus_stops (bus_stop_id, bus_stop_name, latitude, longitude)
+    `)
+    .eq('route_id', journey.route_id)
+    .order('stop_order', { ascending: true });
+  if (sErr) throw sErr;
+
+  const currentIndex = journey.current_stop_index ?? 0;
+  const remaining = structure
+    .filter((s) => s.stop_order > currentIndex)
+    .map((s) => ({
+      bus_stop_id: s.bus_stops.bus_stop_id,
+      bus_stop_name: s.bus_stops.bus_stop_name,
+      latitude: s.bus_stops.latitude,
+      longitude: s.bus_stops.longitude,
+      stop_order: s.stop_order,
+      scheduled_arrival: s.scheduled_arrival,
+    }));
+
+  return {
+    success: true,
+    act_jou_id: journey.act_jou_id,
+    route_name: journey.routes?.route_name || null,
+    fare: journey.routes?.fare ?? null,
+    stops: remaining,
+  };
+}
+
+// --- GET /passenger/stops-for-vehicle/:vehicleId --------------------------
+// Resolve ONGOING journey for vehicle, return route name/fare + stops ahead.
+const getStopsForVehicle = async (req, res) => {
+  const { vehicleId } = req.params;
+  if (!vehicleId) return res.status(400).json({ error: 'vehicleId required' });
+
+  try {
+    const { data: journey, error: jErr } = await supabaseAdmin
+      .from('active_journeys')
+      .select(`
+        act_jou_id,
+        route_id,
+        current_stop_index,
+        routes (route_name, fare)
+      `)
+      .eq('vehicle_id', vehicleId)
+      .eq('status', 'ONGOING')
+      .maybeSingle();
+
+    if (jErr) throw jErr;
+    if (!journey) {
+      return res.status(404).json({
+        success: false,
+        message: 'This bus is not on an active trip right now.',
+      });
+    }
+
+    const payload = await _stopsAheadPayload(journey);
+    return res.status(200).json(payload);
+  } catch (error) {
+    console.error('stops-for-vehicle error:', error.message);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// --- GET /passenger/journey-stops/:actJouId ------------------------------
+// Returns the stops ahead of the bus's current position (for drop-off picker).
+const getJourneyStops = async (req, res) => {
+  const { actJouId } = req.params;
+  if (!actJouId) return res.status(400).json({ error: 'actJouId required' });
+
+  try {
+    const { data: journey, error: jErr } = await supabaseAdmin
+      .from('active_journeys')
+      .select('act_jou_id, route_id, current_stop_index, routes(route_name, fare)')
+      .eq('act_jou_id', actJouId)
+      .single();
+    if (jErr || !journey) return res.status(404).json({ error: 'Journey not found' });
+
+    const payload = await _stopsAheadPayload(journey);
+    return res.status(200).json(payload);
+  } catch (error) {
+    console.error('Journey stops error:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+// --- POST /passenger/resolve-tag  body: { uid, uidHash? } -----------------
+// Maps an NFC tag UID to a vehicle_id when the tag is not NDEF-formatted.
+const resolveTag = async (req, res) => {
+  const { uid, uidHash } = req.body;
+  if (!uid && !uidHash) {
+    return res.status(400).json({ success: false, message: 'uid or uidHash required' });
+  }
+
+  try {
+    const hash = uidHash || crypto.createHash('sha256').update(String(uid)).digest('hex');
+
+    const { data, error } = await supabaseAdmin
+      .from('vehicle_tags')
+      .select('vehicle_id, label, is_active')
+      .eq('uid_hash', hash)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!data || !data.is_active) {
+      return res.status(404).json({ success: false, message: 'Tag not recognized.' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      vehicleId: data.vehicle_id,
+      label: data.label,
+    });
+  } catch (error) {
+    console.error('Tag resolve error:', error.message);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// --- GET /passenger/daily-upcoming-trips ---------------------------------
 const getDailyUpcomingTrips = async (req, res) => {
   try {
-    
-    // This forces the server to evaluate the date in GMT, no matter where it is hosted.
-    const todayPostgres = new Date().getUTCDay(); 
+    const todayPostgres = new Date().getUTCDay();
 
-    // DEBUG: Log what we are looking for
-    console.log(`Fetching active schedules for day_of_week: ${todayPostgres}`);
-
-    // 1. Fetch from Supabase, joining the routes table
     const { data: trips, error: fetchError } = await supabaseAdmin
       .from('recurring_schedules')
       .select(`
         schedule_id,
         departure_time,
         vehicle_id,
-        routes (
-          id,
-          name,
-          start_location,
-          end_location
-        )
+        routes ( id, route_name, description, fare )
       `)
       .eq('day_of_week', todayPostgres)
       .eq('is_active', true)
-      .order('departure_time', { ascending: true }); // Earliest trips first
+      .order('departure_time', { ascending: true });
 
-    // 2. Handle Supabase Errors
     if (fetchError) {
-      console.error("Supabase Query Error (getUpcomingTrips):", fetchError);
-      return res.status(500).json({ 
-        success: false, 
-        message: "Database error occurred while fetching schedules." 
-      });
+      console.error('Upcoming trips query error:', fetchError);
+      return res
+        .status(500)
+        .json({ success: false, message: 'Database error occurred while fetching schedules.' });
     }
 
-    // 3. Success Response
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: `Found ${trips.length} scheduled trips for today.`,
-      data: trips
+      data: trips,
     });
-
   } catch (error) {
-    console.error("Upcoming Trips Error:", error.message);
-    res.status(500).json({ 
-      success: false, 
-      message: "An internal server error occurred while fetching trips." 
+    console.error('Upcoming trips error:', error.message);
+    return res.status(500).json({
+      success: false,
+      message: 'An internal server error occurred while fetching trips.',
     });
   }
 };
 
-
-
-module.exports = { getBalance, processBoarding, getDailyUpcomingTrips};
+module.exports = {
+  getBalance,
+  processBoarding,
+  getJourneyStops,
+  getStopsForVehicle,
+  resolveTag,
+  getDailyUpcomingTrips,
+};

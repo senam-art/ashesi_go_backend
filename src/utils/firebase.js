@@ -1,35 +1,52 @@
 const admin = require('firebase-admin');
-// Ensure you point to wherever you saved your service account key
-const serviceAccount = JSON.parse(Buffer.from(process.env.SERVICE_ACCOUNT_BASE64, 'base64').toString());
 
+const serviceAccount = JSON.parse(
+  Buffer.from(process.env.SERVICE_ACCOUNT_BASE64, 'base64').toString()
+);
 
 admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
+  credential: admin.credential.cert(serviceAccount),
 });
 
 const messaging = admin.messaging();
 
 /**
- * Sends a notification to a specific topic (e.g., 'route_123' or 'all_shuttles')
+ * Sends a bus-arrival notification to the two passenger-facing topics:
+ *   passengers_route_<id>         - passengers watching this route
+ *   passengers_all_shuttles       - passengers who opted into all routes
+ *
+ * Drivers are intentionally NOT targeted by arrival pings; they get their
+ * own UI feedback when they slide the Arrive/Depart control.
  */
-const sendStopNotification = async (topic, routeName, stopName) => {
-  const message = {
-    notification: {
-      title: 'Bus Arriving! 🚌',
-      body: `The ${routeName} shuttle has reached ${stopName}.`,
-    },
-    // We send to the topic for the specific route
-    topic: topic, 
-  };
+const sendStopNotification = async (routeId, routeName, stopName) => {
+  const title = 'Bus Arriving! 🚌';
+  const body = `The ${routeName} shuttle has reached ${stopName}.`;
 
-  try {
-    const response = await messaging.send(message);
-    console.log('Successfully sent notification:', response);
-    return response;
-  } catch (error) {
-    console.error('Error sending notification:', error);
-    throw error;
+  const targets = [
+    `passengers_route_${routeId}`,
+    'passengers_all_shuttles',
+  ];
+
+  const results = [];
+  for (const topic of targets) {
+    try {
+      const response = await messaging.send({
+        notification: { title, body },
+        topic,
+        data: {
+          route_id: String(routeId),
+          stop_name: stopName,
+          kind: 'bus_arrival',
+        },
+      });
+      results.push({ topic, messageId: response });
+    } catch (error) {
+      console.error(`FCM send to ${topic} failed:`, error.message);
+      results.push({ topic, error: error.message });
+    }
   }
+
+  return results;
 };
 
 module.exports = { sendStopNotification };

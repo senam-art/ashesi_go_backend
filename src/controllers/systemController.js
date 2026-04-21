@@ -1,74 +1,83 @@
-// POST /api/admin/schedules
 const { supabaseAdmin } = require('../config/supabase');
 const { sendStopNotification } = require('../utils/firebase');
+const weeklyScheduleJob = require('../jobs/weeklyScheduleJob');
 
+const requireAdminSecret = (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (authHeader !== `Bearer ${process.env.ADMIN_SECRET}`) {
+    res.status(401).json({ error: 'Unauthorized: Invalid Admin Secret' });
+    return false;
+  }
+  return true;
+};
+
+// --- POST /api/scheduler/generate-weekly  (admin) -------------------------
+// Used to seed a new recurring_schedules row.
 const createRecurringSchedule = async (req, res) => {
-    try {
-        // 1. Simple Secret Check
-        const authHeader = req.headers.authorization;
-        if (authHeader !== `Bearer ${process.env.ADMIN_SECRET}`) {
-            return res.status(401).json({ error: "Unauthorized: Invalid Admin Secret" });
-        }
+  if (!requireAdminSecret(req, res)) return;
 
-        // --- SUCCESS! PROCEED WITH CREATION ---
-        const { route_id, driver_id, vehicle_id, day_of_week, departure_time } = req.body;
-
-        // Basic validation
-        if (day_of_week < 0 || day_of_week > 6) {
-            return res.status(400).json({ error: "day_of_week must be between 0 (Sunday) and 6 (Saturday)" });
-        }
-
-        const { data, error } = await supabaseAdmin
-            .from('recurring_schedules')
-            .insert({
-                route_id,
-                driver_id,
-                vehicle_id,
-                day_of_week,
-                departure_time,
-                is_active: true // Defaults to true based on your schema
-            })
-            .select()
-            .single();
-
-        if (error) throw error;
-
-        res.status(201).json({
-            message: "Recurring schedule created successfully",
-            schedule: data
-        });
-
-    } catch (error) {
-        res.status(500).json({ error: error.message });
+  try {
+    const { route_id, driver_id, vehicle_id, day_of_week, departure_time } = req.body;
+    if (day_of_week < 0 || day_of_week > 6) {
+      return res.status(400).json({ error: 'day_of_week must be between 0 (Sunday) and 6 (Saturday)' });
     }
+
+    const { data, error } = await supabaseAdmin
+      .from('recurring_schedules')
+      .insert({
+        route_id,
+        driver_id,
+        vehicle_id,
+        day_of_week,
+        departure_time,
+        is_active: true,
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    return res
+      .status(201)
+      .json({ message: 'Recurring schedule created successfully', schedule: data });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
 };
 
+// --- POST /api/scheduler/run-weekly  (admin) ------------------------------
+// Manual trigger of the weekly materializer (useful for testing + backfills).
+const runWeeklyNow = async (req, res) => {
+  if (!requireAdminSecret(req, res)) return;
+  try {
+    const result = await weeklyScheduleJob.generateWeekly();
+    return res.status(200).json({ success: true, ...result });
+  } catch (error) {
+    console.error('Weekly generator manual run failed:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// --- POST /api/scheduler/webhooks/bus-arrival ----------------------------
+// Called by a Supabase Database Webhook on stop_visit_summaries INSERT.
 const busArrivalNotification = async (req, res) => {
-        // Supabase sends the new row in 'req.body.record'
-    const { record } = req.body; 
+  const { record } = req.body;
+  if (!record) return res.status(400).send('No record found');
 
-    if (!record) return res.status(400).send("No record found");
+  try {
+    const { route_id, route_name, stop_name } = record;
+    await sendStopNotification(route_id, route_name, stop_name);
 
-    try {
-        const { route_id, route_name, stop_name } = record;
-
-        // 🚀 FCM LOGIC LIVES HERE NOW
-        await sendStopNotification(`route_${route_id}`, route_name, stop_name);
-        await sendStopNotification('all_shuttles', route_name, stop_name);
-
-        console.log(`✅ Webhook: Notification sent for ${stop_name}`);
-        return res.status(200).json({ status: "Notification Sent" });
-
-    } catch (error) {
-        console.error("❌ Webhook FCM Error:", error);
-        // We still return 200/OK so Supabase doesn't keep retrying 
-        // a broken notification.
-        return res.status(200).send("FCM Failed but Webhook received.");
-    }
+    console.log(`[bus-arrival] notified passengers for ${stop_name}`);
+    return res.status(200).json({ status: 'Notification Sent' });
+  } catch (error) {
+    console.error('[bus-arrival] FCM failed:', error);
+    return res.status(200).send('FCM Failed but Webhook received.');
+  }
 };
-
 
 module.exports = {
-    createRecurringSchedule,
-    busArrivalNotification
-}
+  createRecurringSchedule,
+  runWeeklyNow,
+  busArrivalNotification,
+};

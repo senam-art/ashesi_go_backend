@@ -1,83 +1,143 @@
-
-const axios = require('axios');
-// 1. IMPORTANT: Destructure { supabaseAdmin } from the config object
 const { supabaseAdmin } = require('../config/supabase');
+const { httpJson } = require('../utils/http');
 
+const PAYSTACK_BASE = 'https://api.paystack.co';
+
+// Paystack statuses we treat as terminal in the DB.
+const TERMINAL_STATUSES = new Set(['success', 'failed', 'abandoned', 'reversed']);
+
+// --- INITIALIZE PAYMENT ---------------------------------------------------
 const initializePayment = async (req, res) => {
   const { email, amount, userId, phoneNumber } = req.body;
-
-  // Paystack expects amount in Pesewas (GHS 1.00 = 100 Pesewas)
   const amountInPesewas = Math.round(parseFloat(amount) * 100);
 
   try {
-    // 2. Initialize Transaction with Paystack
-    const response = await axios.post(
-      'https://api.paystack.co/transaction/initialize',
-      {
-        email: email,
+    const paystack = await httpJson(`${PAYSTACK_BASE}/transaction/initialize`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` },
+      body: {
+        email,
         amount: amountInPesewas,
-        callback_url: "https://ashesigo.com/payment-complete",
+        callback_url: 'https://ashesigo.com/payment-complete',
         metadata: {
           user_id: userId,
           phone_number: phoneNumber,
           custom_fields: [
-            { display_name: "Service", variable_name: "service", value: "Ashesi Go Top-up" }
-          ]
-        }
+            { display_name: 'Service', variable_name: 'service', value: 'Ashesi Go Top-up' },
+          ],
+        },
       },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
+    });
 
-    const { authorization_url, reference } = response.data.data;
+    const { authorization_url, reference } = paystack.data;
 
-    // 3. LOGGING: Verify the userId is present before insertion
-    console.log(`Recording pending transaction for UUID: ${userId}`);
-
-    // 4. DATABASE INSERT: Using the Admin client to bypass RLS
-    const { data, error: dbError } = await supabaseAdmin
-      .from('transactions')
-      .insert({
-        user_id: userId,
-        amount: amount,
-        type: 'top-up',
-        status: 'pending',
-        reference: reference,
-        description: `Wallet top-up via MoMo (${phoneNumber})`
-      })
-      .select(); // Added select() to return the created record for logging
+    const { error: dbError } = await supabaseAdmin.from('transactions').insert({
+      user_id: userId,
+      amount,
+      type: 'top-up',
+      status: 'pending',
+      reference,
+      description: `Wallet top-up via MoMo (${phoneNumber})`,
+    });
 
     if (dbError) {
-      console.error("❌ Supabase Error:", dbError.message);
-      // We don't stop the flow (res.send) here because the user can still pay, 
-      // but we need to know why the log failed.
-    } else {
-      console.log("✅ Pending transaction saved successfully:", data[0].id);
+      console.error('Transactions insert error:', dbError.message);
     }
 
-    // 5. SUCCESS: Send the Paystack URL back to Flutter
-    res.status(200).json({ success: true, url: authorization_url, reference: reference });
-
+    return res.status(200).json({ success: true, url: authorization_url, reference });
   } catch (error) {
-    // Capture Paystack errors specifically
-    const paystackMsg = error.response?.data?.message || error.message;
-    console.error("❌ Initialization Error:", paystackMsg);
-    
-    res.status(500).json({ 
-      success: false, 
-      message: "Payment initialization failed",
-      error: paystackMsg 
+    const msg = error.body?.message || error.message;
+    console.error('Paystack initialize error:', msg);
+    return res.status(500).json({ success: false, message: 'Payment initialization failed', error: msg });
+  }
+};
+
+// --- VERIFY PAYMENT (verify-only, idempotent) -----------------------------
+const verifyPayment = async (req, res) => {
+  const { reference } = req.params;
+
+  try {
+    // 1. Lookup local record.
+    const { data: existing, error: selErr } = await supabaseAdmin
+      .from('transactions')
+      .select('id, user_id, status, amount, metadata')
+      .eq('reference', reference)
+      .maybeSingle();
+
+    if (selErr) throw selErr;
+    if (!existing) {
+      return res.status(404).json({ success: false, status: 'not_found' });
+    }
+
+    // 2. Idempotency: if we've already credited this transaction, short-circuit.
+    if (existing.status === 'success') {
+      return res.status(200).json({
+        success: true,
+        status: 'success',
+        alreadyCredited: true,
+      });
+    }
+
+    // 3. Ask Paystack.
+    const paystack = await httpJson(
+      `${PAYSTACK_BASE}/transaction/verify/${encodeURIComponent(reference)}`,
+      { headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` } }
+    );
+    const tx = paystack?.data;
+    if (!tx) {
+      return res.status(502).json({ success: false, status: 'unknown', message: 'Empty Paystack response' });
+    }
+
+    const next = tx.status; // one of: abandoned, failed, ongoing, pending, processing, queued, reversed, success
+
+    // 4. Metadata patch — always record gateway_response; if card, store auth_code.
+    const metaPatch = {
+      channel: tx.channel,
+      gateway_response: tx.gateway_response,
+      authorization:
+        tx.authorization && tx.authorization.channel === 'card'
+          ? {
+              authorization_code: tx.authorization.authorization_code,
+              last4: tx.authorization.last4,
+              bank: tx.authorization.bank,
+              card_type: tx.authorization.card_type,
+              reusable: tx.authorization.reusable,
+            }
+          : null,
+    };
+
+    // 5. Persist. The DB trigger on_transaction_success fires the wallet credit
+    //    only when status transitions from non-success into success.
+    const update = {
+      status: next,
+      metadata: { ...(existing.metadata || {}), ...metaPatch },
+    };
+    if (next === 'success') update.verified_at = new Date().toISOString();
+
+    const { error: upErr } = await supabaseAdmin
+      .from('transactions')
+      .update(update)
+      .eq('reference', reference);
+
+    if (upErr) throw upErr;
+
+    return res.status(200).json({
+      success: next === 'success',
+      status: next,
+      terminal: TERMINAL_STATUSES.has(next),
+      gateway_response: tx.gateway_response,
+    });
+  } catch (error) {
+    console.error('Verification error:', error.body?.message || error.message);
+    return res.status(500).json({
+      success: false,
+      status: 'error',
+      message: 'Verification failed',
     });
   }
 };
 
-
-
-// --- GET BALANCE ---
+// --- GET BALANCE ----------------------------------------------------------
 const getBalance = async (req, res) => {
   const { userId } = req.params;
   try {
@@ -88,14 +148,14 @@ const getBalance = async (req, res) => {
       .single();
 
     if (error) throw error;
-    res.status(200).json({ balance: data.balance });
+    return res.status(200).json({ balance: data.balance });
   } catch (error) {
-    console.error("Balance Fetch Error:", error.message);
-    res.status(500).json({ success: false, message: error.message });
+    console.error('Balance fetch error:', error.message);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// --- GET TRANSACTIONS ---
+// --- GET TRANSACTIONS -----------------------------------------------------
 const getTransactions = async (req, res) => {
   const { userId } = req.params;
   try {
@@ -106,53 +166,11 @@ const getTransactions = async (req, res) => {
       .order('created_at', { ascending: false });
 
     if (error) throw error;
-    res.status(200).json(data);
+    return res.status(200).json(data);
   } catch (error) {
-    console.error("Transaction Fetch Error:", error.message);
-    res.status(500).json({ success: false, message: error.message });
+    console.error('Transactions fetch error:', error.message);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 
-
-//Verify payment
-
-const verifyPayment = async (req, res) => {
-  const { reference } = req.params;
-
-  try {
-    // 1. Ask Paystack: "Is this reference actually paid?"
-    const response = await axios.get(
-      `https://api.paystack.co/transaction/verify/${reference}`,
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-        }
-      }
-    );
-
-    const paymentData = response.data.data;
-
-    if (paymentData.status === 'success') {
-      // 2. If Paystack says yes, update Supabase to 'success'
-      // THIS WILL FIRE YOUR TRIGGER AND ADD THE MONEY
-      const { error } = await supabaseAdmin
-        .from('transactions')
-        .update({ status: 'success' })
-        .eq('reference', reference);
-
-      if (error) throw error;
-
-      return res.status(200).json({ success: true, message: "Balance updated!" });
-    } else {
-      return res.status(400).json({ success: false, message: "Payment not confirmed yet." });
-    }
-
-  } catch (error) {
-    console.error("Verification Error:", error.message);
-    res.status(500).json({ success: false, message: "Verification failed" });
-  }
-};
-
-
-
-module.exports = { initializePayment, getBalance, getTransactions,verifyPayment };
+module.exports = { initializePayment, getBalance, getTransactions, verifyPayment };

@@ -1,0 +1,17 @@
+-- ============================================================================
+-- Ashesi Go - Row Level Security Policies
+-- ============================================================================
+-- Placeholder. RLS is currently enabled on most tables but policies are
+-- managed through the Supabase dashboard. Document them here as we codify.
+--
+-- Convention when we move them into SQL:
+--   - Read access for owners via auth.uid()
+--   - Service-role access bypasses RLS automatically (supabaseAdmin client)
+-- ============================================================================
+
+-- Example pattern (do NOT uncomment until reviewed):
+-- alter table public.profiles enable row level security;
+-- drop policy if exists "profiles_select_self" on public.profiles;
+-- create policy "profiles_select_self"
+--   on public.profiles for select
+--   using (auth.uid() = id);
