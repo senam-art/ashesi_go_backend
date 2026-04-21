@@ -13,7 +13,6 @@ const getRoutes = async (req, res) => {
     res.json({
       status: 'Success',
       dashboard: {
-        stats: { totalTrips: 124, totalPassengers: 1205 },
         immediateTrip: routes[0],
         otherTrips: routes.slice(1),
       },
@@ -439,6 +438,139 @@ const getJourneyStatus = async (req, res) => {
   }
 };
 
+// --- GET /driver/history/:driverId ---------------------------------------
+// Completed journeys for a driver with passenger counts + route metadata.
+const getDriverHistory = async (req, res) => {
+  const { driverId } = req.params;
+  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+
+  if (!driverId) {
+    return res.status(400).json({ success: false, message: 'driverId required' });
+  }
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('active_journeys')
+      .select(`
+        act_jou_id,
+        status,
+        started_at,
+        completed_at,
+        current_passenger_count,
+        current_capacity,
+        vehicle_id,
+        routes ( route_name, route_distance_meters, route_duration_seconds ),
+        vehicles ( license_plate, model )
+      `)
+      .eq('driver_id', driverId)
+      .order('started_at', { ascending: false })
+      .limit(limit);
+
+    if (error) throw error;
+
+    const trips = (data || []).map((j) => ({
+      id: j.act_jou_id,
+      status: j.status,
+      started_at: j.started_at,
+      completed_at: j.completed_at,
+      passengers: j.current_passenger_count || 0,
+      capacity: j.current_capacity || 0,
+      route_name: j.routes?.route_name || 'Ashesi Shuttle',
+      route_distance_meters: j.routes?.route_distance_meters || null,
+      route_duration_seconds: j.routes?.route_duration_seconds || null,
+      license_plate: j.vehicles?.license_plate || null,
+      vehicle_model: j.vehicles?.model || null,
+    }));
+
+    // Summary stats: totals across completed journeys only.
+    const completed = trips.filter((t) => t.status === 'COMPLETED');
+    const totalDistanceKm = completed.reduce(
+      (sum, t) => sum + (t.route_distance_meters || 0),
+      0
+    ) / 1000;
+    const totalPassengers = completed.reduce((sum, t) => sum + (t.passengers || 0), 0);
+
+    return res.status(200).json({
+      success: true,
+      trips,
+      summary: {
+        total_trips: completed.length,
+        total_passengers: totalPassengers,
+        total_distance_km: Number(totalDistanceKm.toFixed(1)),
+      },
+    });
+  } catch (err) {
+    console.error('Driver history error:', err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// --- GET /driver/profile/:driverId ---------------------------------------
+// Returns the canonical driver record joined with the most recently assigned
+// vehicle (inferred from their latest active journey, including upcoming).
+const getDriverProfile = async (req, res) => {
+  const { driverId } = req.params;
+  if (!driverId) {
+    return res.status(400).json({ success: false, message: 'driverId required' });
+  }
+
+  try {
+    const { data: profile, error: pErr } = await supabaseAdmin
+      .from('profiles')
+      .select(
+        'id, first_name, last_name, username, phone_number, role, total_rides, profile_image_url'
+      )
+      .eq('id', driverId)
+      .maybeSingle();
+    if (pErr) throw pErr;
+    if (!profile || profile.role !== 'driver') {
+      return res.status(404).json({ success: false, message: 'Driver not found' });
+    }
+
+    const { data: driverRow } = await supabaseAdmin
+      .from('drivers')
+      .select('driver_id, is_verified, created_at')
+      .eq('driver_id', driverId)
+      .maybeSingle();
+
+    const { data: latestJourney } = await supabaseAdmin
+      .from('active_journeys')
+      .select('vehicle_id, status, started_at, vehicles (license_plate, model, sitting_capacity)')
+      .eq('driver_id', driverId)
+      .order('started_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    return res.status(200).json({
+      success: true,
+      profile: {
+        id: profile.id,
+        first_name: profile.first_name,
+        last_name: profile.last_name,
+        full_name: `${profile.first_name} ${profile.last_name}`.trim(),
+        username: profile.username,
+        phone_number: profile.phone_number,
+        total_rides: profile.total_rides || 0,
+        profile_image_url: profile.profile_image_url,
+        is_verified: driverRow?.is_verified || false,
+        member_since: driverRow?.created_at || null,
+        vehicle: latestJourney?.vehicles
+          ? {
+              id: latestJourney.vehicle_id,
+              license_plate: latestJourney.vehicles.license_plate,
+              model: latestJourney.vehicles.model,
+              capacity: latestJourney.vehicles.sitting_capacity,
+              last_journey_status: latestJourney.status,
+            }
+          : null,
+      },
+    });
+  } catch (err) {
+    console.error('Driver profile error:', err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 module.exports = {
   getRoutes,
   startJourney,
@@ -450,4 +582,6 @@ module.exports = {
   recordStopAction,
   endTrip,
   getJourneyStatus,
+  getDriverHistory,
+  getDriverProfile,
 };

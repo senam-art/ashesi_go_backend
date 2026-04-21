@@ -12,5 +12,7 @@ router.get('/schedule/today', driverController.getTodaySchedule);
 router.post('/journey/record-stop', driverController.recordStopVisit);
 router.post('/journey/record-action', driverController.recordStopAction);
 router.get('/journey/status/:actJouId', driverController.getJourneyStatus);
+router.get('/history/:driverId', driverController.getDriverHistory);
+router.get('/profile/:driverId', driverController.getDriverProfile);
 
 module.exports = router;

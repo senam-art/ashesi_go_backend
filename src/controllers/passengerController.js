@@ -325,6 +325,58 @@ const getDailyUpcomingTrips = async (req, res) => {
   }
 };
 
+// --- GET /passenger/history/:userId --------------------------------------
+// Completed trips for this passenger, most recent first. Combines boardings
+// with the owning active_journey + route so the client doesn't need to stitch.
+const getPassengerHistory = async (req, res) => {
+  const { userId } = req.params;
+  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+
+  if (!userId) {
+    return res.status(400).json({ success: false, message: 'userId required' });
+  }
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('boardings')
+      .select(`
+        id,
+        boarded_at,
+        active_journey_id,
+        active_journeys (
+          status,
+          completed_at,
+          started_at,
+          routes ( route_name, fare )
+        )
+      `)
+      .eq('passenger_id', userId)
+      .order('boarded_at', { ascending: false })
+      .limit(limit);
+
+    if (error) throw error;
+
+    const trips = (data || []).map((row) => {
+      const journey = row.active_journeys || {};
+      const route = journey.routes || {};
+      return {
+        id: row.id,
+        boarded_at: row.boarded_at,
+        completed_at: journey.completed_at,
+        started_at: journey.started_at,
+        status: journey.status || 'UNKNOWN',
+        route_name: route.route_name || 'Ashesi Shuttle',
+        fare: route.fare != null ? Number(route.fare) : null,
+      };
+    });
+
+    return res.status(200).json({ success: true, trips });
+  } catch (err) {
+    console.error('Passenger history error:', err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 module.exports = {
   getBalance,
   processBoarding,
@@ -332,4 +384,5 @@ module.exports = {
   getStopsForVehicle,
   resolveTag,
   getDailyUpcomingTrips,
+  getPassengerHistory,
 };

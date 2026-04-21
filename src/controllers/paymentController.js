@@ -1,5 +1,8 @@
 const { supabaseAdmin } = require('../config/supabase');
 const { httpJson } = require('../utils/http');
+const {
+  upsertCardFromAuthorization,
+} = require('./paymentMethodController');
 
 const PAYSTACK_BASE = 'https://api.paystack.co';
 
@@ -91,20 +94,30 @@ const verifyPayment = async (req, res) => {
     const next = tx.status; // one of: abandoned, failed, ongoing, pending, processing, queued, reversed, success
 
     // 4. Metadata patch — always record gateway_response; if card, store auth_code.
+    const cardAuth =
+      tx.authorization && tx.authorization.channel === 'card'
+        ? {
+            authorization_code: tx.authorization.authorization_code,
+            last4: tx.authorization.last4,
+            bank: tx.authorization.bank,
+            card_type: tx.authorization.card_type,
+            exp_month: tx.authorization.exp_month,
+            exp_year: tx.authorization.exp_year,
+            reusable: tx.authorization.reusable,
+          }
+        : null;
+
     const metaPatch = {
       channel: tx.channel,
       gateway_response: tx.gateway_response,
-      authorization:
-        tx.authorization && tx.authorization.channel === 'card'
-          ? {
-              authorization_code: tx.authorization.authorization_code,
-              last4: tx.authorization.last4,
-              bank: tx.authorization.bank,
-              card_type: tx.authorization.card_type,
-              reusable: tx.authorization.reusable,
-            }
-          : null,
+      authorization: cardAuth,
     };
+
+    // On a successful card charge with a reusable authorization, save it as a
+    // payment method so the user doesn't have to re-enter the card next time.
+    if (next === 'success' && cardAuth?.reusable !== false && cardAuth?.authorization_code) {
+      await upsertCardFromAuthorization(existing.user_id, cardAuth);
+    }
 
     // 5. Persist. The DB trigger on_transaction_success fires the wallet credit
     //    only when status transitions from non-success into success.

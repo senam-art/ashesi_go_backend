@@ -8,5 +8,6 @@ router.post('/resolve-tag', passengerController.resolveTag);
 router.get('/journey-stops/:actJouId', passengerController.getJourneyStops);
 router.get('/stops-for-vehicle/:vehicleId', passengerController.getStopsForVehicle);
 router.get('/daily-upcoming-trips', passengerController.getDailyUpcomingTrips);
+router.get('/history/:userId', passengerController.getPassengerHistory);
 
 module.exports = router;
