@@ -10,6 +10,7 @@
 
 const cron = require('node-cron');
 const { supabaseAdmin } = require('../config/supabase');
+const { logLine } = require('../utils/verboseLog');
 
 const DAYS_AHEAD = 7;
 
@@ -41,6 +42,7 @@ function buildUpcomingCandidates(schedules, runAt) {
 }
 
 async function generateWeekly({ runAt = new Date() } = {}) {
+  logLine('weeklyScheduleJob', `generateWeekly runAt=${runAt.toISOString()}`);
   const { data: schedules, error } = await supabaseAdmin
     .from('recurring_schedules')
     .select('schedule_id, route_id, driver_id, vehicle_id, day_of_week, departure_time, is_active')
@@ -48,10 +50,15 @@ async function generateWeekly({ runAt = new Date() } = {}) {
 
   if (error) throw error;
 
+  logLine('weeklyScheduleJob', `loaded ${(schedules || []).length} active recurring_schedules rows`);
+
   const candidates = buildUpcomingCandidates(schedules, runAt);
   if (candidates.length === 0) {
+    logLine('weeklyScheduleJob', 'no candidates for this window');
     return { inserted: 0, skipped: 0, total: 0 };
   }
+
+  logLine('weeklyScheduleJob', `materializing ${candidates.length} candidate journey rows`);
 
   const rows = candidates.map((c) => ({
     route_id: c.schedule.route_id,
@@ -74,6 +81,11 @@ async function generateWeekly({ runAt = new Date() } = {}) {
 
   if (insErr) throw insErr;
 
+  logLine(
+    'weeklyScheduleJob',
+    `upsert finished total=${rows.length} insertedIds=${(inserted || []).length}`
+  );
+
   return {
     total: rows.length,
     inserted: (inserted || []).length,
@@ -83,7 +95,7 @@ async function generateWeekly({ runAt = new Date() } = {}) {
 
 function start() {
   if (process.env.ENABLE_SCHEDULER !== 'true') {
-    console.log('[weeklyScheduleJob] ENABLE_SCHEDULER not true, not scheduling.');
+    logLine('weeklyScheduleJob', 'ENABLE_SCHEDULER not true — cron not registered');
     return null;
   }
 
@@ -92,14 +104,16 @@ function start() {
     '55 23 * * 0',
     async () => {
       const startedAt = Date.now();
+      logLine('weeklyScheduleJob', `cron tick fired at ${new Date().toISOString()}`);
       try {
         const result = await generateWeekly();
-        console.log(
-          `[weeklyScheduleJob] done in ${Date.now() - startedAt}ms`,
-          result
+        logLine(
+          'weeklyScheduleJob',
+          `cron run finished in ${Date.now() - startedAt}ms ${JSON.stringify(result)}`
         );
       } catch (err) {
         console.error('[weeklyScheduleJob] failure:', err.message);
+        logLine('weeklyScheduleJob', `cron run FAILED: ${err.message}`);
       }
     },
     { timezone: 'Africa/Accra' }

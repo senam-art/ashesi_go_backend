@@ -1,3 +1,5 @@
+const { sanitize, sanitizeHeaders, logHttp } = require('./verboseLog');
+
 /**
  * httpJson(url, opts)
  *
@@ -8,6 +10,14 @@
 async function httpJson(url, { method = 'GET', headers = {}, body, timeoutMs = 10000 } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  logHttp('OUTBOUND_REQUEST', {
+    method,
+    url,
+    timeoutMs,
+    headers: sanitizeHeaders(headers),
+    body: body != null ? sanitize(body) : null,
+  });
 
   try {
     const res = await fetch(url, {
@@ -20,6 +30,13 @@ async function httpJson(url, { method = 'GET', headers = {}, body, timeoutMs = 1
     const text = await res.text();
     const json = text ? safeJsonParse(text) : null;
 
+    logHttp('OUTBOUND_RESPONSE', {
+      url,
+      status: res.status,
+      ok: res.ok,
+      body: sanitize(json),
+    });
+
     if (!res.ok) {
       const err = new Error((json && json.message) || `HTTP ${res.status}`);
       err.status = res.status;
@@ -29,6 +46,12 @@ async function httpJson(url, { method = 'GET', headers = {}, body, timeoutMs = 1
 
     return json;
   } catch (err) {
+    logHttp('OUTBOUND_ERROR', {
+      url,
+      message: err.message,
+      status: err.status,
+      body: err.body != null ? sanitize(err.body) : undefined,
+    });
     if (err.name === 'AbortError') {
       const timeoutErr = new Error(`Request to ${url} timed out after ${timeoutMs}ms`);
       timeoutErr.status = 504;

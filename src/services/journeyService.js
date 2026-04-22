@@ -1,5 +1,6 @@
 const { supabaseAdmin } = require('../config/supabase');
 const { httpJson } = require('../utils/http');
+const { logLine } = require('../utils/verboseLog');
 
 // ---------------------------------------------------------------------------
 // getRouteWithCache
@@ -25,6 +26,8 @@ const getRouteWithCache = async (actJouId) => {
 
   if (ajError || !activeJourney) throw new Error('Active Journey not found');
 
+  logLine('routeCache', `getRouteWithCache start actJouId=${actJouId}`);
+
   const routeMaster = activeJourney.routes;
   const targetRouteId = activeJourney.route_id;
 
@@ -48,11 +51,19 @@ const getRouteWithCache = async (actJouId) => {
   const hoursSinceUpdate = (Date.now() - lastFetched.getTime()) / (1000 * 60 * 60);
   const needsUpdate = !routeMaster.encoded_polyline || hoursSinceUpdate > 24;
 
+  logLine(
+    'routeCache',
+    `polyline cache actJouId=${actJouId} routeId=${targetRouteId} ` +
+      `needsRefresh=${needsUpdate} hoursSincePolylineFetch=${hoursSinceUpdate.toFixed(2)} ` +
+      `hasPolyline=${Boolean(routeMaster.encoded_polyline)} stops=${stops.length}`
+  );
+
   let finalPolyline = routeMaster.encoded_polyline;
   let distanceMeters = null;
   let durationSeconds = null;
 
   if (needsUpdate) {
+    logLine('routeCache', `calling Google Routes API for routeId=${targetRouteId}`);
     try {
       const first = stops[0].bus_stops;
       const last = stops[stops.length - 1].bus_stops;
@@ -103,12 +114,21 @@ const getRouteWithCache = async (actJouId) => {
 
         if (updateError) {
           console.error('Route cache update failed:', updateError.message);
+        } else {
+          logLine('routeCache', `Supabase routes row updated routeId=${targetRouteId}`);
         }
       }
     } catch (err) {
       console.error('Google Routes API error:', err.body?.message || err.message);
     }
+  } else {
+    logLine('routeCache', `using cached polyline routeId=${targetRouteId} (no Google call)`);
   }
+
+  logLine(
+    'routeCache',
+    `getRouteWithCache done actJouId=${actJouId} polylineChars=${finalPolyline ? String(finalPolyline).length : 0}`
+  );
 
   return {
     act_jou_id: activeJourney.act_jou_id,
@@ -124,6 +144,7 @@ const getRouteWithCache = async (actJouId) => {
 //   schedules for that postgres day (Sun=0..Sat=6).
 // ---------------------------------------------------------------------------
 const getUpcomingTrips = async (req, res) => {
+  logLine('scheduler', `fetch-all-trips incoming query=${JSON.stringify(req.query)}`);
   try {
     let targetDayPostgres;
 
@@ -160,6 +181,7 @@ const getUpcomingTrips = async (req, res) => {
       return res.status(500).json({ success: false, message: 'Database error fetching schedules.' });
     }
 
+    logLine('scheduler', `fetch-all-trips ok rows=${(trips || []).length} dayPg=${targetDayPostgres}`);
     return res.status(200).json({ success: true, data: trips });
   } catch (error) {
     console.error('Upcoming trips unexpected error:', error.message);
