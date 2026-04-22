@@ -1,5 +1,6 @@
 const { supabase, supabaseAdmin } = require('../config/supabase');
 const journeyService = require('../services/journeyService');
+const { sendGlobalDriverAlert } = require('../utils/firebase');
 
 // --- GET /driver/routes ---------------------------------------------------
 const getRoutes = async (req, res) => {
@@ -98,6 +99,93 @@ const startJourney = async (req, res) => {
   } catch (err) {
     console.error('Start Journey Error:', err.message);
     return res.status(500).json({ error: 'Internal Server Error', details: err.message });
+  }
+};
+
+const DRIVER_ALERT_TEMPLATES = {
+  BUS_BREAKDOWN: {
+    title: 'Shuttle service disruption',
+    body: 'Bus issue reported. Please expect delays while a replacement is arranged.',
+  },
+  EMERGENCY_STOP: {
+    title: 'Emergency stop update',
+    body: 'The shuttle made an emergency stop. Operations will resume once it is safe.',
+  },
+  HEAVY_TRAFFIC: {
+    title: 'Heavy traffic delay',
+    body: 'Route is experiencing unusual traffic. Arrival times may shift.',
+  },
+  WEATHER_DELAY: {
+    title: 'Weather-related delay',
+    body: 'Travel speed is reduced due to weather conditions. Please plan extra time.',
+  },
+  ROUTE_DIVERSION: {
+    title: 'Route diversion notice',
+    body: 'The shuttle is temporarily using an alternate route due to road conditions.',
+  },
+};
+
+// --- POST /driver/broadcast-alert -----------------------------------------
+// Driver operational broadcast to all app users via FCM topic `all_users`.
+const broadcastAlert = async (req, res) => {
+  const { driverId, code, customMessage } = req.body || {};
+
+  if (!driverId || !code) {
+    return res.status(400).json({ error: 'driverId and code are required' });
+  }
+
+  const template = DRIVER_ALERT_TEMPLATES[code];
+  if (!template) {
+    return res.status(400).json({
+      error: 'Unsupported alert code',
+      allowed: Object.keys(DRIVER_ALERT_TEMPLATES),
+    });
+  }
+
+  try {
+    // Minimal authorization guard: user must be a driver profile.
+    const { data: profile, error: pErr } = await supabaseAdmin
+      .from('profiles')
+      .select('id, role, first_name, last_name')
+      .eq('id', driverId)
+      .maybeSingle();
+    if (pErr) throw pErr;
+    if (!profile || profile.role !== 'driver') {
+      return res.status(403).json({ error: 'Only drivers can send broadcasts' });
+    }
+
+    const cleanCustom = typeof customMessage === 'string' ? customMessage.trim() : '';
+    const body = cleanCustom.length > 0 ? cleanCustom : template.body;
+    const senderName = `${profile.first_name || ''} ${profile.last_name || ''}`.trim();
+
+    const result = await sendGlobalDriverAlert({
+      title: template.title,
+      body,
+      data: {
+        code,
+        driver_id: driverId,
+        sender_name: senderName,
+      },
+      topic: 'all_users',
+    });
+
+    if (!result.ok) {
+      return res.status(502).json({
+        success: false,
+        error: result.error || 'FCM send failed',
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      code,
+      title: template.title,
+      body,
+      fcm: result,
+    });
+  } catch (err) {
+    console.error('broadcastAlert error:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
   }
 };
 
@@ -644,4 +732,5 @@ module.exports = {
   getJourneyStatus,
   getDriverHistory,
   getDriverProfile,
+  broadcastAlert,
 };

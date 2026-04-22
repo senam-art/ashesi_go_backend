@@ -56,4 +56,38 @@ const sendStopNotification = async (routeId, routeName, stopName) => {
   return results;
 };
 
-module.exports = { sendStopNotification };
+/**
+ * Sends a high-priority operational broadcast from drivers to all app users.
+ * Topic contract:
+ *   all_users - every signed-in device should subscribe to this topic.
+ */
+const sendGlobalDriverAlert = async ({
+  title,
+  body,
+  data = {},
+  topic = 'all_users',
+}) => {
+  const payload = {
+    notification: { title, body },
+    topic,
+    data: {
+      kind: 'driver_broadcast',
+      ...Object.fromEntries(
+        Object.entries(data).map(([k, v]) => [k, v == null ? '' : String(v)])
+      ),
+    },
+  };
+
+  try {
+    logLine('fcm', `sendGlobalDriverAlert topic=${topic} title="${title}"`);
+    const messageId = await messaging.send(payload);
+    logLine('fcm', `sendGlobalDriverAlert OK messageId=${messageId}`);
+    return { ok: true, topic, messageId };
+  } catch (error) {
+    console.error(`FCM global alert to ${topic} failed:`, error.message);
+    logLine('fcm', `sendGlobalDriverAlert FAILED topic=${topic} err=${error.message}`);
+    return { ok: false, topic, error: error.message };
+  }
+};
+
+module.exports = { sendStopNotification, sendGlobalDriverAlert };
