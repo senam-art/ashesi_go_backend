@@ -169,7 +169,13 @@ const getUpcomingTrips = async (req, res) => {
           id,
           route_name,
           description,
-          fare
+          fare,
+          route_structure (
+            stop_order,
+            bus_stops (
+              bus_stop_name
+            )
+          )
         )
       `)
       .eq('day_of_week', targetDayPostgres)
