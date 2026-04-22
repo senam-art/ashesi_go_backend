@@ -534,7 +534,7 @@ const getJourneyStatus = async (req, res) => {
       .select(`
         stop_order,
         scheduled_arrival,
-        bus_stops (bus_stop_id, bus_stop_name)
+        bus_stops (bus_stop_id, bus_stop_name, latitude, longitude)
       `)
       .eq('route_id', journey.route_id)
       .order('stop_order', { ascending: true });
@@ -551,6 +551,8 @@ const getJourneyStatus = async (req, res) => {
       return {
         id: s.bus_stops.bus_stop_id,
         name: s.bus_stops.bus_stop_name,
+        latitude: s.bus_stops.latitude,
+        longitude: s.bus_stops.longitude,
         stop_order: s.stop_order,
         scheduled_arrival: s.scheduled_arrival,
         actual_arrival: visit ? visit.arrival_time : null,
