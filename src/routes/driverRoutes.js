@@ -9,6 +9,7 @@ router.get('/active-journeys', driverController.getActiveJourneys);
 router.post('/route-data', driverController.getRouteData);
 router.post('/journey-data', driverController.getJourneyData);
 router.get('/schedule/today', driverController.getTodaySchedule);
+router.get('/my-ongoing-journey', driverController.getMyOngoingJourney);
 router.post('/journey/record-stop', driverController.recordStopVisit);
 router.post('/journey/record-action', driverController.recordStopAction);
 router.get('/journey/status/:actJouId', driverController.getJourneyStatus);

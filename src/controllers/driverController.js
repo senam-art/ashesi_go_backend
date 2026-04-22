@@ -39,7 +39,7 @@ const startJourney = async (req, res) => {
 
     const { data: activeTrips, error: aError } = await supabaseAdmin
       .from('active_journeys')
-      .select('vehicle_id, driver_id')
+      .select('act_jou_id, vehicle_id, driver_id')
       .eq('status', 'ONGOING')
       .or(`driver_id.eq.${driverId},vehicle_id.eq.${vehicleId}`);
 
@@ -48,15 +48,25 @@ const startJourney = async (req, res) => {
     }
 
     if (activeTrips && activeTrips.length > 0) {
-      const isDriverBusy = activeTrips.some((t) => t.driver_id === driverId);
-      const isBusBusy = activeTrips.some((t) => t.vehicle_id === vehicleId);
+      const sameDriverAndBus = activeTrips.find(
+        (t) => t.driver_id === driverId && t.vehicle_id === vehicleId
+      );
+      if (sameDriverAndBus) {
+        return res.status(409).json({
+          error: 'You and this bus are already on a trip!',
+          journeyId: sameDriverAndBus.act_jou_id,
+        });
+      }
 
-      if (isDriverBusy && isBusBusy) {
-        return res.status(400).json({ error: 'You and this bus are already on a trip!' });
+      const driverRow = activeTrips.find((t) => t.driver_id === driverId);
+      if (driverRow) {
+        return res.status(409).json({
+          error: 'You already have an ongoing trip. Complete it first.',
+          journeyId: driverRow.act_jou_id,
+        });
       }
-      if (isDriverBusy) {
-        return res.status(400).json({ error: 'You already have an ongoing trip. Complete it first.' });
-      }
+
+      const isBusBusy = activeTrips.some((t) => t.vehicle_id === vehicleId);
       if (isBusBusy) {
         return res.status(400).json({ error: 'This bus is currently being driven by someone else.' });
       }
@@ -169,6 +179,55 @@ const getJourneyData = async (req, res) => {
   } catch (error) {
     console.error('journey-data controller error:', error.message);
     return res.status(500).json({ status: 'Error', message: error.message });
+  }
+};
+
+// --- GET /driver/my-ongoing-journey?driverId=... ---------------------------
+// Lets the app recover after restart: one ONGOING row for this driver.
+const getMyOngoingJourney = async (req, res) => {
+  try {
+    const { driverId } = req.query;
+    if (!driverId) {
+      return res.status(400).json({ error: 'driverId is required' });
+    }
+
+    const { data: rows, error } = await supabaseAdmin
+      .from('active_journeys')
+      .select(
+        `
+        act_jou_id,
+        route_id,
+        vehicle_id,
+        status,
+        started_at,
+        routes ( route_name )
+      `
+      )
+      .eq('driver_id', driverId)
+      .eq('status', 'ONGOING')
+      .order('started_at', { ascending: false })
+      .limit(1);
+
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    const row = rows && rows[0];
+    if (!row) {
+      return res.status(200).json({ ongoing: false });
+    }
+
+    return res.status(200).json({
+      ongoing: true,
+      journeyId: row.act_jou_id,
+      route_id: row.route_id,
+      vehicle_id: row.vehicle_id,
+      route_name: row.routes?.route_name || 'Unknown Route',
+      started_at: row.started_at,
+    });
+  } catch (err) {
+    console.error('getMyOngoingJourney error:', err.message);
+    return res.status(500).json({ error: 'Internal server error' });
   }
 };
 
@@ -578,6 +637,7 @@ module.exports = {
   getRouteData,
   getJourneyData,
   getTodaySchedule,
+  getMyOngoingJourney,
   recordStopVisit,
   recordStopAction,
   endTrip,
