@@ -23,11 +23,11 @@ const getRoutes = async (req, res) => {
   }
 };
 
-// --- POST /driver/start-trip ---------------------------------------------
 const startJourney = async (req, res) => {
   const { routeId, driverId, vehicleId } = req.body;
 
   try {
+    // 1. Verify vehicle exists
     const { data: vehicle, error: vError } = await supabaseAdmin
       .from('vehicles')
       .select('vehicle_id, license_plate')
@@ -38,9 +38,10 @@ const startJourney = async (req, res) => {
       return res.status(404).json({ error: 'Vehicle not found. Contact transport office.' });
     }
 
+    // 2. Check for conflicts in the NEW 'journeys' table
     const { data: activeTrips, error: aError } = await supabaseAdmin
-      .from('active_journeys')
-      .select('act_jou_id, vehicle_id, driver_id')
+      .from('journeys') // ✨ Target the master journeys table
+      .select('journey_id, vehicle_id, driver_id')
       .eq('status', 'ONGOING')
       .or(`driver_id.eq.${driverId},vehicle_id.eq.${vehicleId}`);
 
@@ -49,21 +50,11 @@ const startJourney = async (req, res) => {
     }
 
     if (activeTrips && activeTrips.length > 0) {
-      const sameDriverAndBus = activeTrips.find(
-        (t) => t.driver_id === driverId && t.vehicle_id === vehicleId
-      );
-      if (sameDriverAndBus) {
-        return res.status(409).json({
-          error: 'You and this bus are already on a trip!',
-          journeyId: sameDriverAndBus.act_jou_id,
-        });
-      }
-
       const driverRow = activeTrips.find((t) => t.driver_id === driverId);
       if (driverRow) {
         return res.status(409).json({
           error: 'You already have an ongoing trip. Complete it first.',
-          journeyId: driverRow.act_jou_id,
+          journeyId: driverRow.journey_id,
         });
       }
 
@@ -73,23 +64,37 @@ const startJourney = async (req, res) => {
       }
     }
 
+    // 3. Create the Master Record
     const { data: journey, error: jError } = await supabaseAdmin
       .from('journeys')
-      .insert([{ route_id: routeId, driver_id: driverId, vehicle_id: vehicleId, current_lap: 1,}])
+      .insert([{ 
+        route_id: routeId, 
+        driver_id: driverId, 
+        vehicle_id: vehicleId,
+        // current_lap should move to active_journey_states if it's ephemeral
+      }])
       .select()
       .single();
 
     if (jError) throw jError;
     
+    // 4. Create the Live State entry
     const { error: sError } = await supabaseAdmin
       .from('active_journey_states')
-      .insert([{ journey_id: journey.journey_id, current_stop_index: 1, }]);
+      .insert([{ 
+        journey_id: journey.journey_id, 
+        current_stop_index: 0, 
+      }]);
+
+    if (sError) throw sError;
     
+    // 5. Success Response
     return res.status(201).json({
       status: 'Journey Started',
-      journeyId: data.act_jou_id,
+      journeyId: journey.journey_id, // ✨ Fixed: changed from data.act_jou_id
       vehicle: vehicle.license_plate,
     });
+
   } catch (err) {
     console.error('Start Journey Error:', err.message);
     return res.status(500).json({ error: 'Internal Server Error', details: err.message });
