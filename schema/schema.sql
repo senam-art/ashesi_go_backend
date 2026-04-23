@@ -246,3 +246,23 @@ create table if not exists public.trip_logs (
   fare_paid     numeric(10, 2) default 5.00,
   created_at    timestamptz default now()
 );
+
+-- ---------------------------------------------------------------------------
+-- journey_history (Archived completed trips for Driver History)
+-- ---------------------------------------------------------------------------
+create table if not exists public.journey_history (
+  history_id               uuid primary key default extensions.uuid_generate_v4(),
+  original_journey_id      uuid not null,
+  route_id                 uuid,
+  driver_id                uuid,
+  vehicle_id               uuid,
+  final_passenger_count    integer,
+  total_laps               integer,
+  started_at               timestamptz,
+  completed_at             timestamptz default now(),
+  created_at               timestamptz default now()
+);
+
+-- Index for fast lookup when a driver checks their history page
+create index if not exists idx_journey_history_driver 
+  on public.journey_history (driver_id);

@@ -73,24 +73,18 @@ const startJourney = async (req, res) => {
       }
     }
 
-    const { data, error: insertError } = await supabaseAdmin
-      .from('active_journeys')
-      .insert([
-        {
-          route_id: routeId,
-          driver_id: driverId,
-          vehicle_id: vehicleId,
-          status: 'ONGOING',
-          current_lap: 1,
-          current_stop_index: 0,
-          started_at: new Date(),
-        },
-      ])
+    const { data: journey, error: jError } = await supabaseAdmin
+      .from('journeys')
+      .insert([{ route_id: routeId, driver_id: driverId, vehicle_id: vehicleId, current_lap: 1,}])
       .select()
       .single();
 
-    if (insertError) throw insertError;
-
+    if (jError) throw jError;
+    
+    const { error: sError } = await supabaseAdmin
+      .from('active_journey_states')
+      .insert([{ journey_id: journey.journey_id, current_stop_index: 1, }]);
+    
     return res.status(201).json({
       status: 'Journey Started',
       journeyId: data.act_jou_id,
@@ -190,31 +184,55 @@ const broadcastAlert = async (req, res) => {
 };
 
 // --- GET /driver/active-journeys -----------------------------------------
+
 const getActiveJourneys = async (req, res) => {
   try {
     const { data: journeys, error } = await supabaseAdmin
-      .from('active_journeys')
+      .from('journeys')
       .select(`
-        *,
+        journey_id,
+        status,
         routes (
           route_name,
-          encoded_polyline
-        )
-      `);
+          encoded_polyline,
+          sitting_capacity, -- Ensure this is in your routes or vehicles table
+          route_structure (
+            scheduled_arrival,
+            bus_stops (
+              bus_stop_name,
+              latitude,
+              longitude
+            )
+          )
+        ),
+        active_journey_states (*)
+      `)
+      .eq('status', 'ONGOING');
 
     if (error) throw error;
 
-    const formatted = journeys.map((j) => ({
-      act_jou_id: j.act_jou_id,
-      route_id: j.route_id,
-      status: j.status,
-      current_passenger_count: j.current_passenger_count || 0,
-      current_stop_index: j.current_stop_index || 0,
-      route_name: j.routes?.route_name || 'Unknown Route',
-      encoded_polyline: j.routes?.encoded_polyline || '',
-      last_known_lat: j.last_known_lat,
-      last_known_lng: j.last_known_lng,
-    }));
+    const formatted = journeys.map((j) => {
+      const state = j.active_journey_states?.[0] || {}; // Handle array response
+      const route = j.routes || {};
+      
+      return {
+        act_jou_id: j.journey_id,
+        route_name: route.route_name,
+        status: j.status,
+        encoded_polyline: route.encoded_polyline,
+        current_passenger_count: state.current_passenger_count || 0,
+        current_stop_index: state.current_stop_index || 0,
+        last_known_lat: state.last_known_lat,
+        last_known_lng: state.last_known_lng,
+        // ✨ Map the nested stops so the RouteData.fromJson can find them
+        bus_stops: route.route_structure?.map(s => ({
+          name: s.bus_stops.bus_stop_name,
+          latitude: s.bus_stops.latitude,
+          longitude: s.bus_stops.longitude,
+          scheduled_arrival: s.scheduled_arrival
+        })) || []
+      };
+    });
 
     return res.status(200).json(formatted);
   } catch (error) {
@@ -280,23 +298,23 @@ const getMyOngoingJourney = async (req, res) => {
     }
 
     const { data: rows, error } = await supabaseAdmin
-      .from('active_journeys')
-      .select(
-        `
-        act_jou_id,
+      .from('journeys') 
+      .select(`
+        journey_id,
         route_id,
         vehicle_id,
         status,
         started_at,
-        routes ( route_name )
-      `
-      )
+        routes ( route_name ),
+        active_journey_states ( current_stop_index ) 
+      `)
       .eq('driver_id', driverId)
       .eq('status', 'ONGOING')
       .order('started_at', { ascending: false })
       .limit(1);
 
     if (error) {
+      console.error('Database error:', error.message);
       return res.status(500).json({ error: error.message });
     }
 
@@ -305,19 +323,24 @@ const getMyOngoingJourney = async (req, res) => {
       return res.status(200).json({ ongoing: false });
     }
 
+    // Safely extract the state if it exists
+    const state = row.active_journey_states || {};
+
     return res.status(200).json({
       ongoing: true,
-      journeyId: row.act_jou_id,
+      journeyId: row.journey_id, 
       route_id: row.route_id,
       vehicle_id: row.vehicle_id,
       route_name: row.routes?.route_name || 'Unknown Route',
       started_at: row.started_at,
+      current_stop_index: state.current_stop_index || 0 
     });
   } catch (err) {
     console.error('getMyOngoingJourney error:', err.message);
     return res.status(500).json({ error: 'Internal server error' });
   }
 };
+
 
 // --- GET /driver/schedule/today?driverId=... ------------------------------
 const getTodaySchedule = async (req, res) => {
@@ -366,9 +389,9 @@ const getTodaySchedule = async (req, res) => {
 // ---------------------------------------------------------------------------
 const recordArrival = async ({ actJouId, stopId }) => {
   const { data: journey, error: jError } = await supabaseAdmin
-    .from('active_journeys')
-    .select(`route_id, routes (route_name)`)
-    .eq('act_jou_id', actJouId)
+    .from('journeys')
+    .select(`journey_id, routes (route_name)`)
+    .eq('journey_id', actJouId)
     .single();
   if (jError || !journey) throw new Error('Active journey not found.');
 
@@ -414,9 +437,9 @@ const recordArrival = async ({ actJouId, stopId }) => {
   if (visitError) throw visitError;
 
   await supabaseAdmin
-    .from('active_journeys')
+    .from('journeys')
     .update({ current_stop_index: stopOrder })
-    .eq('act_jou_id', actJouId);
+    .eq('journey_id', actJouId);
 
   return { visit, stopName };
 };
@@ -485,19 +508,48 @@ const recordStopAction = async (req, res) => {
 
 // --- POST /driver/end-trip ------------------------------------------------
 const endTrip = async (req, res) => {
-  const { actJouId } = req.body;
-  if (!actJouId) return res.status(400).json({ error: 'actJouId required' });
+  // We'll accept 'journeyId' or 'actJouId' for backward compatibility
+  const journeyId = req.body.journeyId || req.body.actJouId;
+
+  if (!journeyId) {
+    return res.status(400).json({ error: 'journeyId (or actJouId) required' });
+  }
 
   try {
-    const { data, error } = await supabaseAdmin
-      .from('active_journeys')
-      .update({ status: 'COMPLETED', completed_at: new Date().toISOString() })
-      .eq('act_jou_id', actJouId)
-      .select('act_jou_id, status, completed_at')
-      .single();
+    // 1. Get the current passenger count from the state table before deleting it
+  const { data: state } = await supabaseAdmin
+    .from('active_journey_states')
+    .select('current_passenger_count')
+    .eq('journey_id', journeyId)
+    .single();
 
-    if (error) throw error;
-    return res.status(200).json({ success: true, journey: data });
+  const finalCount = state?.current_passenger_count || 0;
+    
+    // 1. Update the Master Record (journeys)
+    // We mark it COMPLETED and set the final timestamp.
+    await supabaseAdmin
+    .from('journeys')
+    .update({ 
+      status: 'COMPLETED', 
+      completed_at: new Date().toISOString(),
+      final_passenger_count: finalCount // ✨ Save the count here!
+    })
+    .eq('journey_id', journeyId);
+
+    // 2. Delete the Ephemeral State (active_journey_states)
+    // This removes the "live" presence from the system (GPS, current stop, etc.)
+    // but leaves the 'journeys' record and all linked 'boardings' intact.
+   await supabaseAdmin
+    .from('active_journey_states')
+    .delete()
+    .eq('journey_id', journeyId);
+
+    return res.status(200).json({ 
+      success: true, 
+      message: 'Trip completed and state archived.',
+      journey 
+    });
+
   } catch (error) {
     console.error('End trip error:', error);
     return res.status(500).json({ error: error.message });
@@ -506,22 +558,27 @@ const endTrip = async (req, res) => {
 
 // --- GET /driver/journey/status/:actJouId ---------------------------------
 const getJourneyStatus = async (req, res) => {
-  const { actJouId } = req.params;
+  // Support both param names for transition period
+  const journeyId = req.params.journeyId || req.params.actJouId;
 
   try {
+    // 1. Fetch Journey Master AND Live State
     const { data: journey, error: jError } = await supabaseAdmin
-      .from('active_journeys')
+      .from('journeys')
       .select(`
-        act_jou_id,
+        journey_id,
         route_id,
         vehicle_id,
         status,
-        current_capacity,
-        current_passenger_count,
-        current_stop_index,
-        routes (route_name, encoded_polyline)
+        routes (route_name, encoded_polyline, fare),
+        active_journey_states (
+          current_stop_index,
+          current_passenger_count,
+          last_known_lat,
+          last_known_lng
+        )
       `)
-      .eq('act_jou_id', actJouId)
+      .eq('journey_id', journeyId)
       .single();
 
     if (jError || !journey) {
@@ -529,6 +586,7 @@ const getJourneyStatus = async (req, res) => {
       return res.status(404).json({ error: 'Journey record not found' });
     }
 
+    // 2. Fetch the static Route Structure (The sequence of stops)
     const { data: structure, error: sError } = await supabaseAdmin
       .from('route_structure')
       .select(`
@@ -538,14 +596,18 @@ const getJourneyStatus = async (req, res) => {
       `)
       .eq('route_id', journey.route_id)
       .order('stop_order', { ascending: true });
+
     if (sError) throw sError;
 
+    // 3. Fetch the actual Visit Logs for this specific trip
     const { data: visits, error: vError } = await supabaseAdmin
       .from('stop_visit_summaries')
       .select('stop_id, arrival_time, departed_at, is_delayed')
-      .eq('active_journey_id', actJouId);
+      .eq('active_journey_id', journeyId);
+
     if (vError) throw vError;
 
+    // 4. Merge structure with actual visit data
     const stops = structure.map((s) => {
       const visit = visits.find((v) => v.stop_id === s.bus_stops.bus_stop_id);
       return {
@@ -561,26 +623,32 @@ const getJourneyStatus = async (req, res) => {
       };
     });
 
-    // Bus is "at stop" if latest visit for current stop has arrived but not departed.
-    const currentStop = stops[journey.current_stop_index] || stops[0];
+    // 5. Determine current state
+    // If the trip is COMPLETED, active_journey_states will be null. 
+    // We fall back to sensible defaults.
+    const liveState = journey.active_journey_states || {};
+    const currentIndex = liveState.current_stop_index ?? 0;
+    
+    const currentStop = stops[currentIndex];
     const isAtStop = !!(currentStop && currentStop.actual_arrival && !currentStop.departed_at);
 
-    const nextUnvisited = stops.findIndex((s) => s.actual_arrival === null);
-
+    // 6. Return formatted JSON matching your Flutter RouteData model
     return res.status(200).json({
-      act_jou_id: journey.act_jou_id,
+      act_jou_id: journey.journey_id,
+      journey_id: journey.journey_id,
+      route_id: journey.route_id,
       vehicle_id: journey.vehicle_id,
-      route_name: journey.routes.route_name,
+      route_name: journey.routes?.route_name || 'Unknown Route',
       status: journey.status,
-      passenger_count: journey.current_passenger_count,
-      capacity: journey.current_capacity,
-      encoded_polyline: journey.routes.encoded_polyline,
-      current_stop_index:
-        journey.current_stop_index ??
-        (nextUnvisited === -1 ? stops.length - 1 : nextUnvisited),
+      passenger_count: liveState.current_passenger_count || 0,
+      current_stop_index: currentIndex,
+      last_known_lat: liveState.last_known_lat,
+      last_known_lng: liveState.last_known_lng,
       is_at_stop: isAtStop,
-      stops,
+      encoded_polyline: journey.routes?.encoded_polyline,
+      bus_stops: stops, // Matches the 'bus_stops' key in your Dart model
     });
+
   } catch (error) {
     console.error('Status lookup error:', error);
     return res.status(500).json({ error: error.message });
@@ -588,7 +656,6 @@ const getJourneyStatus = async (req, res) => {
 };
 
 // --- GET /driver/history/:driverId ---------------------------------------
-// Completed journeys for a driver with passenger counts + route metadata.
 const getDriverHistory = async (req, res) => {
   const { driverId } = req.params;
   const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
@@ -599,45 +666,56 @@ const getDriverHistory = async (req, res) => {
 
   try {
     const { data, error } = await supabaseAdmin
-      .from('active_journeys')
+      .from('journeys') // ✨ Switched to Master Table
       .select(`
-        act_jou_id,
+        journey_id,
         status,
         started_at,
         completed_at,
-        current_passenger_count,
-        current_capacity,
+        final_passenger_count, -- ✨ Use the archived count
         vehicle_id,
-        routes ( route_name, route_distance_meters, route_duration_seconds ),
+        routes ( 
+          route_name, 
+          route_distance_meters, 
+          route_duration_seconds,
+          fare 
+        ),
         vehicles ( license_plate, model )
       `)
       .eq('driver_id', driverId)
+      // We typically only want to show finished trips in History
+      .in('status', ['COMPLETED', 'CANCELLED']) 
       .order('started_at', { ascending: false })
       .limit(limit);
 
     if (error) throw error;
 
     const trips = (data || []).map((j) => ({
-      id: j.act_jou_id,
+      id: j.journey_id, // Consistent with new naming
       status: j.status,
       started_at: j.started_at,
       completed_at: j.completed_at,
-      passengers: j.current_passenger_count || 0,
-      capacity: j.current_capacity || 0,
+      passengers: j.final_passenger_count || 0,
       route_name: j.routes?.route_name || 'Ashesi Shuttle',
-      route_distance_meters: j.routes?.route_distance_meters || null,
-      route_duration_seconds: j.routes?.route_duration_seconds || null,
-      license_plate: j.vehicles?.license_plate || null,
-      vehicle_model: j.vehicles?.model || null,
+      route_distance_meters: j.routes?.route_distance_meters || 0,
+      route_duration_seconds: j.routes?.route_duration_seconds || 0,
+      license_plate: j.vehicles?.license_plate || 'N/A',
+      vehicle_model: j.vehicles?.model || 'Toyota Coaster',
+      fare_collected: (j.final_passenger_count || 0) * (j.routes?.fare || 0)
     }));
 
-    // Summary stats: totals across completed journeys only.
+    // Summary stats
     const completed = trips.filter((t) => t.status === 'COMPLETED');
+    
     const totalDistanceKm = completed.reduce(
       (sum, t) => sum + (t.route_distance_meters || 0),
       0
     ) / 1000;
-    const totalPassengers = completed.reduce((sum, t) => sum + (t.passengers || 0), 0);
+
+    const totalPassengers = completed.reduce(
+      (sum, t) => sum + (t.passengers || 0), 
+      0
+    );
 
     return res.status(200).json({
       success: true,
