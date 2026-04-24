@@ -393,57 +393,82 @@ const getTodaySchedule = async (req, res) => {
 // recordArrival: shared body for legacy recordStopVisit + record-action ARRIVE
 // ---------------------------------------------------------------------------
 const recordArrival = async ({ actJouId, stopId }) => {
+  // 1. Fetch Journey AND explicitly include route_id
   const { data: journey, error: jError } = await supabaseAdmin
     .from('journeys')
-    .select(`journey_id, routes (route_name)`)
+    .select(`
+      journey_id, 
+      route_id, -- ✨ CRITICAL: This was missing!
+      routes (route_name)
+    `)
     .eq('journey_id', actJouId)
     .single();
+
   if (jError || !journey) throw new Error('Active journey not found.');
 
   const routeId = journey.route_id;
-  const routeName = journey.routes.route_name;
+  const routeName = journey.routes?.route_name || 'Unknown Route';
 
+  // 2. Validate the stop exists on THIS specific route
   const { data: struct, error: sError } = await supabaseAdmin
     .from('route_structure')
-    .select(`stop_order, scheduled_arrival, bus_stops (bus_stop_name)`)
-    .eq('route_id', routeId)
+    .select(`
+      stop_order, 
+      scheduled_arrival, 
+      bus_stops (bus_stop_name)
+    `)
+    .eq('route_id', routeId) // Now routeId actually has a value
     .eq('bus_stop_id', stopId)
     .single();
-  if (sError || !struct) throw new Error("This stop is not part of this route's structure.");
+
+  if (sError || !struct) {
+    console.error(`Stop Check Failed: Route ${routeId}, Stop ${stopId}`);
+    throw new Error("This stop is not part of this route's structure.");
+  }
 
   const stopOrder = struct.stop_order;
   const scheduledArrival = struct.scheduled_arrival;
   const stopName = struct.bus_stops.bus_stop_name;
 
+  // 3. Simple delay logic (10-minute threshold)
   let isDelayed = false;
   if (scheduledArrival) {
-    const scheduled = new Date();
+    const nowTime = new Date();
     const [hours, minutes] = scheduledArrival.split(':');
+    const scheduled = new Date();
     scheduled.setHours(parseInt(hours, 10), parseInt(minutes, 10), 0);
-    isDelayed = Date.now() - scheduled.getTime() > 10 * 60 * 1000;
+    
+    // If current time is 10+ mins past scheduled arrival
+    isDelayed = (nowTime.getTime() - scheduled.getTime()) > 10 * 60 * 1000;
   }
 
-  const now = new Date().toISOString();
+  const nowIso = new Date().toISOString();
+
+  // 4. Log the visit for history/analytics
   const { data: visit, error: visitError } = await supabaseAdmin
     .from('stop_visit_summaries')
-    .insert([
-      {
-        active_journey_id: actJouId,
-        stop_id: stopId,
-        arrival_time: now,
-        is_delayed: isDelayed,
-        route_id: routeId,
-        route_name: routeName,
-        stop_name: stopName,
-      },
-    ])
+    .insert([{
+      active_journey_id: actJouId,
+      stop_id: stopId,
+      arrival_time: nowIso,
+      is_delayed: isDelayed,
+      route_id: routeId,
+      route_name: routeName,
+      stop_name: stopName,
+    }])
     .select()
     .single();
+
   if (visitError) throw visitError;
 
+  // 5. Update the LIVE STATE (Option 3 style)
+  // We update active_journey_states so the map/timeline reflects the progress
   await supabaseAdmin
-    .from('journeys')
-    .update({ current_stop_index: stopOrder })
+    .from('active_journey_states')
+    .update({ 
+      current_stop_index: stopOrder,
+      updated_at: nowIso 
+    })
     .eq('journey_id', actJouId);
 
   return { visit, stopName };
@@ -494,7 +519,7 @@ const recordStopAction = async (req, res) => {
 
     if (findErr) throw findErr;
     if (!existing) {
-      return res.status(400).json({ error: 'Cannot DEPART a stop that was never ARRIVEd at.' });
+      return res.status(400).json({ error: 'Cannot DEPART a stop that was never ARRIVED at.' });
     }
 
     const { error: updErr } = await supabaseAdmin
