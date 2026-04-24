@@ -713,79 +713,51 @@ const getJourneyStatus = async (req, res) => {
 // --- GET /driver/history/:driverId ---------------------------------------
 const getDriverHistory = async (req, res) => {
   const { driverId } = req.params;
-  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
-
-  if (!driverId) {
-    return res.status(400).json({ success: false, message: 'driverId required' });
-  }
+  const { limit = 10 } = req.query;
 
   try {
-    const { data, error } = await supabaseAdmin
-      .from('journeys') 
+    const { data: history, error } = await supabaseAdmin
+      .from('journeys')
       .select(`
         journey_id,
-        status,
-        started_at,
+        scheduled_at,
+        actual_started_at,
         completed_at,
-        final_passenger_count, 
-        vehicle_id,
-        routes ( 
-          route_name, 
-          route_distance_meters, 
-          route_duration_seconds,
-          fare 
-        ),
-        vehicles ( license_plate, model )
+        status,
+        final_passenger_count,
+        routes (
+          route_name,
+          fare
+        )
       `)
       .eq('driver_id', driverId)
-      // We typically only want to show finished trips in History
+      // Only show completed or cancelled trips in history
       .in('status', ['COMPLETED', 'CANCELLED']) 
-      .order('started_at', { ascending: false })
-      .limit(limit);
+      // ✨ SYNCED: Use actual_started_at for the timeline order
+      .order('actual_started_at', { ascending: false })
+      .limit(parseInt(limit));
 
-    if (error) throw error;
-
-    const trips = (data || []).map((j) => ({
-      id: j.journey_id, // Consistent with new naming
-      status: j.status,
-      started_at: j.started_at,
-      completed_at: j.completed_at,
-      passengers: j.final_passenger_count || 0,
-      route_name: j.routes?.route_name || 'Ashesi Shuttle',
-      route_distance_meters: j.routes?.route_distance_meters || 0,
-      route_duration_seconds: j.routes?.route_duration_seconds || 0,
-      license_plate: j.vehicles?.license_plate || 'N/A',
-      vehicle_model: j.vehicles?.model || 'Toyota Coaster',
-      fare_collected: (j.final_passenger_count || 0) * (j.routes?.fare || 0)
-    }));
-
-    // Summary stats
-    const completed = trips.filter((t) => t.status === 'COMPLETED');
-    
-    const totalDistanceKm = completed.reduce(
-      (sum, t) => sum + (t.route_distance_meters || 0),
-      0
-    ) / 1000;
-
-    const totalPassengers = completed.reduce(
-      (sum, t) => sum + (t.passengers || 0), 
-      0
-    );
+    if (error) {
+      console.error('Driver history error:', error.message);
+      return res.status(500).json({ 
+        success: false, 
+        message: error.message 
+      });
+    }
 
     return res.status(200).json({
       success: true,
-      trips,
-      summary: {
-        total_trips: completed.length,
-        total_passengers: totalPassengers,
-        total_distance_km: Number(totalDistanceKm.toFixed(1)),
-      },
+      data: history
     });
   } catch (err) {
-    console.error('Driver history error:', err.message);
-    return res.status(500).json({ success: false, message: err.message });
+    console.error('Unexpected history error:', err.message);
+    return res.status(500).json({ 
+      success: false, 
+      message: 'Internal server error' 
+    });
   }
 };
+
 
 // --- GET /driver/profile/:driverId ---------------------------------------
 // Returns the canonical driver record joined with the most recently assigned
