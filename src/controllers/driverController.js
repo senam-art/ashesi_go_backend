@@ -563,8 +563,8 @@ const recordStopAction = async (req, res) => {
 };
 
 // --- POST /driver/end-trip ------------------------------------------------
+// --- POST /driver/end-trip ------------------------------------------------
 const endTrip = async (req, res) => {
-  // We'll accept 'journeyId' or 'actJouId' for backward compatibility
   const journeyId = req.body.journeyId || req.body.actJouId;
 
   if (!journeyId) {
@@ -572,38 +572,37 @@ const endTrip = async (req, res) => {
   }
 
   try {
-    // 1. Get the current passenger count from the state table before deleting it
-  const { data: state } = await supabaseAdmin
-    .from('active_journey_states')
-    .select('current_passenger_count')
-    .eq('journey_id', journeyId)
-    .single();
+    // 1. Get the current passenger count from the state table
+    const { data: state } = await supabaseAdmin
+      .from('active_journey_states')
+      .select('current_passenger_count')
+      .eq('journey_id', journeyId)
+      .maybeSingle(); // Changed to maybeSingle to prevent crash if already deleted
 
-  const finalCount = state?.current_passenger_count || 0;
+    const finalCount = state?.current_passenger_count || 0;
     
-    // 1. Update the Master Record (journeys)
-    // We mark it COMPLETED and set the final timestamp.
-    await supabaseAdmin
-    .from('journeys')
-    .update({ 
-      status: 'COMPLETED', 
-      completed_at: new Date().toISOString(),
-      final_passenger_count: finalCount // ✨ Save the count here!
-    })
-    .eq('journey_id', journeyId);
+    // 2. Update the Master Record (journeys)
+    const { error: updateError } = await supabaseAdmin
+      .from('journeys')
+      .update({ 
+        status: 'COMPLETED', 
+        completed_at: new Date().toISOString(),
+        final_passenger_count: finalCount 
+      })
+      .eq('journey_id', journeyId);
 
-    // 2. Delete the Ephemeral State (active_journey_states)
-    // This removes the "live" presence from the system (GPS, current stop, etc.)
-    // but leaves the 'journeys' record and all linked 'boardings' intact.
-   await supabaseAdmin
-    .from('active_journey_states')
-    .delete()
-    .eq('journey_id', journeyId);
+    if (updateError) throw updateError;
+
+    // 3. Delete the Ephemeral State
+    await supabaseAdmin
+      .from('active_journey_states')
+      .delete()
+      .eq('journey_id', journeyId);
 
     return res.status(200).json({ 
       success: true, 
       message: 'Trip completed and state archived.',
-      journey 
+      journeyId: journeyId // ✨ Return ID instead of undefined variable
     });
 
   } catch (error) {
