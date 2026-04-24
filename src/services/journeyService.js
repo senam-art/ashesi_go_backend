@@ -214,7 +214,7 @@ const getTripDetails = async (req, res) => {
       .select(`
         *, 
         routes (*, route_structure (stop_order, bus_stops (*))),
-        active_journey_states (current_stop_index, is_at_stop)
+        active_journey_states (current_stop_index) /* ✨ Removed is_at_stop */
       `)
       .eq('journey_id', id)
       .maybeSingle();
@@ -223,7 +223,6 @@ const getTripDetails = async (req, res) => {
     if (!journey) return res.status(404).json({ message: "Journey not found" });
 
     // 2. Fetch Actual Arrival Times (if the trip has started)
-    // This allows us to show the "Checkmarks" on the timeline
     const { data: visits } = await supabaseAdmin
       .from('stop_visit_summaries')
       .select('bus_stop_id, actual_arrival, departed_at')
@@ -241,7 +240,7 @@ const getTripDetails = async (req, res) => {
       route: journey.routes,
       // Live progress
       current_stop_index: journey.active_journey_states?.current_stop_index || 0,
-      is_at_stop: journey.active_journey_states?.is_at_stop || false,
+      is_at_stop: false, /* ✨ Hardcoded to false so the Flutter app doesn't complain */
       // Historical Stop Data
       actualVisits: visits || []
     });
