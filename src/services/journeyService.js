@@ -205,4 +205,53 @@ const getUpcomingTrips = async (req, res) => {
   }
 };
 
-module.exports = { getRouteWithCache, getUpcomingTrips };
+// --- GET /api/journeys/trip-details/:id -------------------------------------------
+const getTripDetails = async (req, res) => {
+  const { id } = req.params; // This could be a schedule_id OR a journey_id
+
+  try {
+    // 1. Check if it's an active or completed JOURNEY first
+    const { data: journey } = await supabaseAdmin
+      .from('journeys')
+      .select(`*, routes(*, route_structure(stop_order, bus_stops(*)))`)
+      .eq('journey_id', id)
+      .maybeSingle();
+
+    if (journey) {
+      // It's a REAL trip (Ongoing or Completed)
+      // Pull actual arrival times from stop_visit_summaries
+      const { data: visits } = await supabaseAdmin
+        .from('stop_visit_summaries')
+        .select('*')
+        .eq('active_journey_id', id);
+
+      return res.status(200).json({
+        type: 'JOURNEY',
+        status: journey.status,
+        data: journey,
+        actualVisits: visits
+      });
+    }
+
+    // 2. If not found in journeys, check recurring_schedules
+    const { data: schedule } = await supabaseAdmin
+      .from('recurring_schedules')
+      .select(`*, routes(*, route_structure(stop_order, bus_stops(*)))`)
+      .eq('schedule_id', id)
+      .maybeSingle();
+
+    if (schedule) {
+      return res.status(200).json({
+        type: 'SCHEDULE',
+        status: 'PENDING',
+        data: schedule,
+        actualVisits: [] // No visits yet!
+      });
+    }
+
+    return res.status(404).json({ message: "Trip not found" });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+};
+module.exports = { getRouteWithCache, getUpcomingTrips, getTripDetails };
