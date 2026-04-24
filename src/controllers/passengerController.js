@@ -323,7 +323,7 @@ const getDailyUpcomingTrips = async (req, res) => {
       .gte('scheduled_at', startOfDay.toISOString())
       .lte('scheduled_at', endOfDay.toISOString())
       // We exclude 'COMPLETED' trips from the active schedule view
-      .in('status', ['SCHEDULED', 'ONGOING'])
+      .in('status', ['SCHEDULED', 'ONGOING','COMPLETED'])
       .order('scheduled_at', { ascending: true });
 
     // 3. Filter by Driver if provided
