@@ -599,14 +599,15 @@ const endTrip = async (req, res) => {
       .delete()
       .eq('journey_id', journeyId);
 
-    return res.status(200).json({ 
-      success: true, 
-      message: 'Trip completed and state archived.',
-      journeyId: journeyId // ✨ Return ID instead of undefined variable
-    });
+    r// ✨ Notify passengers
+    await sendRouteNotification(
+      journey.route_id,
+      "Service Ended 🏁",
+      `The ${journey.routes.route_name} shuttle has completed its service for this session.`
+    );
 
+    return res.status(200).json({ success: true, message: 'Trip archived & passengers notified.' });
   } catch (error) {
-    console.error('End trip error:', error);
     return res.status(500).json({ error: error.message });
   }
 };
@@ -825,6 +826,43 @@ const getDriverProfile = async (req, res) => {
   }
 };
 
+// --- PATCH /api/driver/next-lap ---------------------------------------
+const startNextLap = async (req, res) => {
+  const { journeyId } = req.body;
+
+  try {
+    // 1. Increment the lap count in the Master Record
+    const { data: journey, error: jError } = await supabaseAdmin
+      .from('journeys')
+      .select('current_lap')
+      .eq('journey_id', journeyId)
+      .single();
+      
+    const nextLap = (journey?.current_lap || 1) + 1;
+
+    await supabaseAdmin
+      .from('journeys')
+      .update({ current_lap: nextLap })
+      .eq('journey_id', journeyId);
+
+    // 2. Reset the Live State to the first stop
+    await supabaseAdmin
+      .from('active_journey_states')
+      .update({ 
+        current_stop_index: 0, 
+        updated_at: new Date().toISOString() 
+      })
+      .eq('journey_id', journeyId);
+
+    return res.status(200).json({ 
+      success: true, 
+      lap: nextLap,
+      message: `Starting Lap ${nextLap}` 
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+};
 module.exports = {
   getRoutes,
   startJourney,
@@ -840,4 +878,5 @@ module.exports = {
   getDriverHistory,
   getDriverProfile,
   broadcastAlert,
+  startNextLap
 };

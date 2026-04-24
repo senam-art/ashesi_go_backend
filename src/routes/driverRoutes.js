@@ -16,5 +16,6 @@ router.post('/broadcast-alert', driverController.broadcastAlert);
 router.get('/journey/status/:actJouId', driverController.getJourneyStatus);
 router.get('/history/:driverId', driverController.getDriverHistory);
 router.get('/profile/:driverId', driverController.getDriverProfile);
+router.patch('/next-lap', driverController.startNextLap);
 
 module.exports = router;
