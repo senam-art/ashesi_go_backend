@@ -698,13 +698,13 @@ const getDriverHistory = async (req, res) => {
 
   try {
     const { data, error } = await supabaseAdmin
-      .from('journeys') // ✨ Switched to Master Table
+      .from('journeys') 
       .select(`
         journey_id,
         status,
         started_at,
         completed_at,
-        final_passenger_count, -- ✨ Use the archived count
+        final_passenger_count, 
         vehicle_id,
         routes ( 
           route_name, 
