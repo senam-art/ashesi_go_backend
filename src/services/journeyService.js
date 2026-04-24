@@ -204,6 +204,7 @@ const getUpcomingTrips = async (req, res) => {
 };
 
 // --- GET /api/journeys/trip-details/:id -------------------------------------------
+// --- GET /api/journeys/trip-details/:id -------------------------------------------
 const getTripDetails = async (req, res) => {
   const { id } = req.params; // This is now always a journey_id
 
@@ -211,10 +212,11 @@ const getTripDetails = async (req, res) => {
     // 1. Fetch the Master Journey Record
     const { data: journey, error: jError } = await supabaseAdmin
       .from('journeys')
+      // ✨ FIX: Added scheduled_arrival to the route_structure select list
       .select(`
         *, 
-        routes (*, route_structure (stop_order, bus_stops (*))),
-        active_journey_states (current_stop_index) /* ✨ Removed is_at_stop */
+        routes (*, route_structure (stop_order, scheduled_arrival, bus_stops (*))),
+        active_journey_states (current_stop_index)
       `)
       .eq('journey_id', id)
       .maybeSingle();
@@ -240,7 +242,7 @@ const getTripDetails = async (req, res) => {
       route: journey.routes,
       // Live progress
       current_stop_index: journey.active_journey_states?.current_stop_index || 0,
-      is_at_stop: false, /* ✨ Hardcoded to false so the Flutter app doesn't complain */
+      is_at_stop: false, 
       // Historical Stop Data
       actualVisits: visits || []
     });
@@ -250,4 +252,5 @@ const getTripDetails = async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 };
+
 module.exports = { getRouteWithCache, getUpcomingTrips, getTripDetails };
