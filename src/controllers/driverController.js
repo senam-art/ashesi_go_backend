@@ -89,8 +89,9 @@ const startJourney = async (req, res) => {
       .insert([{
         journey_id: journeyId,
         current_stop_index: 0,
-        is_at_stop: true, 
-        last_updated: new Date().toISOString()
+        // ✨ FIX 1: Removed `is_at_stop: true` since you deleted it from the DB
+        // ✨ FIX 2: Changed `last_updated` to `updated_at` to match your DB schema
+        updated_at: new Date().toISOString() 
       }]);
 
     if (stateError) {
