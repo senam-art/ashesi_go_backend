@@ -3,7 +3,7 @@ const router = express.Router();
 const driverController = require('../controllers/driverController');
 
 router.get('/routes', driverController.getRoutes);
-router.post('/start-trip', driverController.startJourney);
+router.patch('/start-trip', driverController.startJourney);
 router.post('/end-trip', driverController.endTrip);
 router.get('/active-journeys', driverController.getActiveJourneys);
 router.post('/route-data', driverController.getRouteData);

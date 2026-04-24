@@ -12,14 +12,15 @@ const requireAdminSecret = (req, res) => {
 };
 
 // --- POST /api/scheduler/generate-weekly  (admin) -------------------------
-// Used to seed a new recurring_schedules row.
 const createRecurringSchedule = async (req, res) => {
   if (!requireAdminSecret(req, res)) return;
 
   try {
     const { route_id, driver_id, vehicle_id, day_of_week, departure_time } = req.body;
+    
+    // Validation
     if (day_of_week < 0 || day_of_week > 6) {
-      return res.status(400).json({ error: 'day_of_week must be between 0 (Sunday) and 6 (Saturday)' });
+      return res.status(400).json({ error: 'day_of_week must be 0-6' });
     }
 
     const { data, error } = await supabaseAdmin
@@ -37,9 +38,10 @@ const createRecurringSchedule = async (req, res) => {
 
     if (error) throw error;
 
-    return res
-      .status(201)
-      .json({ message: 'Recurring schedule created successfully', schedule: data });
+    return res.status(201).json({ 
+      message: 'Recurring template created', 
+      schedule: data 
+    });
   } catch (error) {
     return res.status(500).json({ error: error.message });
   }

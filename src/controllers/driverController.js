@@ -23,76 +23,86 @@ const getRoutes = async (req, res) => {
   }
 };
 
+// --- PATCH /api/driver/start-trip ---------------------------------------
 const startJourney = async (req, res) => {
-  const { routeId, driverId, vehicleId } = req.body;
+  const { journeyId, driverId, vehicleId } = req.body;
+
+  if (!journeyId || !driverId || !vehicleId) {
+    return res.status(400).json({ error: 'journeyId, driverId, and vehicleId are required.' });
+  }
 
   try {
-    // 1. Verify vehicle exists
-    const { data: vehicle, error: vError } = await supabaseAdmin
-      .from('vehicles')
-      .select('vehicle_id, license_plate')
-      .eq('vehicle_id', vehicleId)
+    // 1. Verify the specific Scheduled Journey exists
+    const { data: scheduledTrip, error: sError } = await supabaseAdmin
+      .from('journeys')
+      .select('status, route_id')
+      .eq('journey_id', journeyId)
       .single();
 
-    if (vError || !vehicle) {
-      return res.status(404).json({ error: 'Vehicle not found. Contact transport office.' });
+    if (sError || !scheduledTrip) {
+      return res.status(404).json({ error: 'Trip not found in the schedule.' });
     }
 
-    // 2. Check for conflicts in the NEW 'journeys' table
-    const { data: activeTrips, error: aError } = await supabaseAdmin
-      .from('journeys') // ✨ Target the master journeys table
+    // 2. Prevent re-starting an already active trip
+    if (scheduledTrip.status === 'ONGOING') {
+      return res.status(400).json({ error: 'This trip is already live.' });
+    }
+
+    // 3. Conflict Check: Ensure Driver/Bus aren't already busy elsewhere
+    const { data: conflicts, error: cError } = await supabaseAdmin
+      .from('journeys')
       .select('journey_id, vehicle_id, driver_id')
       .eq('status', 'ONGOING')
       .or(`driver_id.eq.${driverId},vehicle_id.eq.${vehicleId}`);
 
-    if (aError) {
-      return res.status(500).json({ error: 'Database error.', details: aError.message });
-    }
-
-    if (activeTrips && activeTrips.length > 0) {
-      const driverRow = activeTrips.find((t) => t.driver_id === driverId);
-      if (driverRow) {
-        return res.status(409).json({
-          error: 'You already have an ongoing trip. Complete it first.',
-          journeyId: driverRow.journey_id,
+    if (conflicts && conflicts.length > 0) {
+      const driverBusy = conflicts.find(t => t.driver_id === driverId);
+      if (driverBusy) {
+        return res.status(409).json({ 
+          error: 'You are already in another active journey.', 
+          journeyId: driverBusy.journey_id 
         });
       }
-
-      const isBusBusy = activeTrips.some((t) => t.vehicle_id === vehicleId);
-      if (isBusBusy) {
-        return res.status(400).json({ error: 'This bus is currently being driven by someone else.' });
+      
+      const busBusy = conflicts.find(t => t.vehicle_id === vehicleId);
+      if (busBusy) {
+        return res.status(409).json({ error: 'This bus is currently in use by another driver.' });
       }
     }
 
-    // 3. Create the Master Record
-    const { data: journey, error: jError } = await supabaseAdmin
+    // 4. ACTIVATE: Update the master record status
+    // ✨ SYNCED: Using 'actual_started_at' to match our SQL schema
+    const { error: uError } = await supabaseAdmin
       .from('journeys')
-      .insert([{ 
-        route_id: routeId, 
-        driver_id: driverId, 
+      .update({
+        status: 'ONGOING',
         vehicle_id: vehicleId,
-        // current_lap should move to active_journey_states if it's ephemeral
-      }])
-      .select()
-      .single();
+        actual_started_at: new Date().toISOString() 
+      })
+      .eq('journey_id', journeyId);
 
-    if (jError) throw jError;
-    
-    // 4. Create the Live State entry
-    const { error: sError } = await supabaseAdmin
+    if (uError) throw uError;
+
+    // 5. INITIALIZE LIVE STATE: This makes the bus appear on the map
+    const { error: stateError } = await supabaseAdmin
       .from('active_journey_states')
-      .insert([{ 
-        journey_id: journey.journey_id, 
-        current_stop_index: 0, 
+      .insert([{
+        journey_id: journeyId,
+        current_stop_index: 0,
+        is_at_stop: true, 
+        last_updated: new Date().toISOString()
       }]);
 
-    if (sError) throw sError;
-    
-    // 5. Success Response
-    return res.status(201).json({
-      status: 'Journey Started',
-      journeyId: journey.journey_id, // ✨ Fixed: changed from data.act_jou_id
-      vehicle: vehicle.license_plate,
+    if (stateError) {
+      // Rollback: Return to SCHEDULED if the live state fails to initialize
+      await supabaseAdmin.from('journeys').update({ status: 'SCHEDULED' }).eq('journey_id', journeyId);
+      throw stateError;
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Journey activated successfully',
+      journeyId: journeyId
     });
 
   } catch (err) {
@@ -309,13 +319,18 @@ const getMyOngoingJourney = async (req, res) => {
         route_id,
         vehicle_id,
         status,
-        started_at,
+        scheduled_at,
+        actual_started_at,
         routes ( route_name ),
-        active_journey_states ( current_stop_index ) 
+        active_journey_states ( 
+          current_stop_index,
+          is_at_stop 
+        ) 
       `)
       .eq('driver_id', driverId)
       .eq('status', 'ONGOING')
-      .order('started_at', { ascending: false })
+      // Order by the actual start time to get the most recent active trip
+      .order('actual_started_at', { ascending: false }) 
       .limit(1);
 
     if (error) {
@@ -328,8 +343,14 @@ const getMyOngoingJourney = async (req, res) => {
       return res.status(200).json({ ongoing: false });
     }
 
-    // Safely extract the state if it exists
-    const state = row.active_journey_states || {};
+    /**
+     * Supabase returns joined one-to-one relations as an object or 
+     * a single-element array depending on schema definitions.
+     * We safely handle both here.
+     */
+    const liveState = Array.isArray(row.active_journey_states) 
+      ? row.active_journey_states[0] 
+      : row.active_journey_states;
 
     return res.status(200).json({
       ongoing: true,
@@ -337,8 +358,10 @@ const getMyOngoingJourney = async (req, res) => {
       route_id: row.route_id,
       vehicle_id: row.vehicle_id,
       route_name: row.routes?.route_name || 'Unknown Route',
-      started_at: row.started_at,
-      current_stop_index: state.current_stop_index || 0 
+      scheduled_at: row.scheduled_at,
+      actual_started_at: row.actual_started_at,
+      current_stop_index: liveState?.current_stop_index || 0,
+      is_at_stop: liveState?.is_at_stop ?? false
     });
   } catch (err) {
     console.error('getMyOngoingJourney error:', err.message);

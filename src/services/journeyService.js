@@ -144,31 +144,29 @@ const getRouteWithCache = async (actJouId) => {
 //   schedules for that postgres day (Sun=0..Sat=6).
 // ---------------------------------------------------------------------------
 // --- GET /api/journeys/upcoming -------------------------------------------
+// --- GET /api/scheduler/upcoming -------------------------------------------
 const getUpcomingTrips = async (req, res) => {
   logLine('scheduler', `fetch-trips incoming query=${JSON.stringify(req.query)}`);
   
   try {
-    const { day, driverId } = req.query; // ✨ Added driverId to destructuring
-    let targetDayPostgres;
+    const { date, driverId } = req.query; // Expecting YYYY-MM-DD
+    
+    // 1. Create a date range for the requested day
+    const startOfDay = new Date(date || new Date());
+    startOfDay.setHours(0, 0, 0, 0);
+    
+    const endOfDay = new Date(startOfDay);
+    endOfDay.setHours(23, 59, 59, 999);
 
-    // Day Logic: Dart (1-7) to Postgres (0-6)
-    if (day) {
-      const dartDay = parseInt(day, 10);
-      if (Number.isNaN(dartDay) || dartDay < 1 || dartDay > 7) {
-        return res.status(400).json({ success: false, message: 'Invalid day parameter.' });
-      }
-      targetDayPostgres = dartDay === 7 ? 0 : dartDay;
-    } else {
-      targetDayPostgres = new Date().getUTCDay();
-    }
-
-    // 1. Initialize the query
+    // 2. Initialize the query on the materialized JOURNEYS table
     let query = supabaseAdmin
-      .from('recurring_schedules')
+      .from('journeys')
       .select(`
-        schedule_id,
-        departure_time,
+        journey_id,
+        scheduled_at,
+        status,
         vehicle_id,
+        driver_id,
         routes (
           id,
           route_name,
@@ -180,77 +178,76 @@ const getUpcomingTrips = async (req, res) => {
           )
         )
       `)
-      .eq('day_of_week', targetDayPostgres)
-      .eq('is_active', true);
+      .gte('scheduled_at', startOfDay.toISOString())
+      .lte('scheduled_at', endOfDay.toISOString())
+      // We show both SCHEDULED (future) and ONGOING (current) in the schedule
+      .in('status', ['SCHEDULED', 'ONGOING']);
 
-    // 2. ✨ THE FILTER: If driverId is passed, restrict rows to that driver
+    // 3. Filter by Driver if provided
     if (driverId && driverId !== 'null' && driverId !== '') {
       query = query.eq('driver_id', driverId);
     }
 
-    // 3. Execute
-    const { data: trips, error: fetchError } = await query.order('departure_time', { ascending: true });
+    const { data: trips, error: fetchError } = await query.order('scheduled_at', { ascending: true });
 
     if (fetchError) {
-      console.error('Upcoming trips fetch error:', fetchError);
-      return res.status(500).json({ success: false, message: 'Database error fetching schedules.' });
+      console.error('Upcoming journeys fetch error:', fetchError);
+      return res.status(500).json({ success: false, message: 'Database error fetching journeys.' });
     }
 
-    logLine('scheduler', `fetch-trips ok rows=${(trips || []).length} driverFilter=${driverId || 'none'}`);
     return res.status(200).json({ success: true, data: trips });
 
   } catch (error) {
-    console.error('Upcoming trips unexpected error:', error.message);
+    console.error('Upcoming journeys unexpected error:', error.message);
     return res.status(500).json({ success: false, message: 'Internal server error.' });
   }
 };
 
 // --- GET /api/journeys/trip-details/:id -------------------------------------------
 const getTripDetails = async (req, res) => {
-  const { id } = req.params; // This could be a schedule_id OR a journey_id
+  const { id } = req.params; // This is now always a journey_id
 
   try {
-    // 1. Check if it's an active or completed JOURNEY first
-    const { data: journey } = await supabaseAdmin
+    // 1. Fetch the Master Journey Record
+    const { data: journey, error: jError } = await supabaseAdmin
       .from('journeys')
-      .select(`*, routes(*, route_structure(stop_order, bus_stops(*)))`)
+      .select(`
+        *, 
+        routes (*, route_structure (stop_order, bus_stops (*))),
+        active_journey_states (current_stop_index, is_at_stop)
+      `)
       .eq('journey_id', id)
       .maybeSingle();
 
-    if (journey) {
-      // It's a REAL trip (Ongoing or Completed)
-      // Pull actual arrival times from stop_visit_summaries
-      const { data: visits } = await supabaseAdmin
-        .from('stop_visit_summaries')
-        .select('*')
-        .eq('active_journey_id', id);
+    if (jError) throw jError;
+    if (!journey) return res.status(404).json({ message: "Journey not found" });
 
-      return res.status(200).json({
-        type: 'JOURNEY',
-        status: journey.status,
-        data: journey,
-        actualVisits: visits
-      });
-    }
+    // 2. Fetch Actual Arrival Times (if the trip has started)
+    // This allows us to show the "Checkmarks" on the timeline
+    const { data: visits } = await supabaseAdmin
+      .from('stop_visit_summaries')
+      .select('bus_stop_id, actual_arrival, departed_at')
+      .eq('active_journey_id', id);
 
-    // 2. If not found in journeys, check recurring_schedules
-    const { data: schedule } = await supabaseAdmin
-      .from('recurring_schedules')
-      .select(`*, routes(*, route_structure(stop_order, bus_stops(*)))`)
-      .eq('schedule_id', id)
-      .maybeSingle();
+    // 3. Construct Unified Response
+    return res.status(200).json({
+      success: true,
+      type: 'JOURNEY',
+      status: journey.status,
+      // Metadata
+      scheduled_at: journey.scheduled_at,
+      actual_started_at: journey.actual_started_at,
+      // Route Info
+      route: journey.routes,
+      // Live progress
+      current_stop_index: journey.active_journey_states?.current_stop_index || 0,
+      is_at_stop: journey.active_journey_states?.is_at_stop || false,
+      // Historical Stop Data
+      actualVisits: visits || []
+    });
 
-    if (schedule) {
-      return res.status(200).json({
-        type: 'SCHEDULE',
-        status: 'PENDING',
-        data: schedule,
-        actualVisits: [] // No visits yet!
-      });
-    }
-
-    return res.status(404).json({ message: "Trip not found" });
   } catch (err) {
+    console.error('Trip Details Error:', err.message);
     return res.status(500).json({ error: err.message });
   }
 };

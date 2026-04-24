@@ -290,41 +290,70 @@ const resolveTag = async (req, res) => {
 // --- GET /passenger/daily-upcoming-trips ---------------------------------
 const getDailyUpcomingTrips = async (req, res) => {
   try {
-    const todayPostgres = new Date().getUTCDay();
+    const { driverId, date } = req.query;
+    
+    // 1. Logic: Use provided date or default to Today
+    const targetDate = date ? new Date(date) : new Date();
+    
+    const startOfDay = new Date(targetDate);
+    startOfDay.setHours(0, 0, 0, 0);
+    
+    const endOfDay = new Date(targetDate);
+    endOfDay.setHours(23, 59, 59, 999);
 
-    const { data: trips, error: fetchError } = await supabaseAdmin
-      .from('recurring_schedules')
+    // 2. Query the Materialized JOURNEYS table
+    let query = supabaseAdmin
+      .from('journeys')
       .select(`
-        schedule_id,
-        departure_time,
+        journey_id,
+        scheduled_at,
+        status,
         vehicle_id,
-        routes ( id, route_name, description, fare )
+        routes ( 
+          id, 
+          route_name, 
+          description, 
+          fare,
+          route_structure (
+            stop_order,
+            bus_stops (bus_stop_name)
+          )
+        )
       `)
-      .eq('day_of_week', todayPostgres)
-      .eq('is_active', true)
-      .order('departure_time', { ascending: true });
+      .gte('scheduled_at', startOfDay.toISOString())
+      .lte('scheduled_at', endOfDay.toISOString())
+      // We exclude 'COMPLETED' trips from the active schedule view
+      .in('status', ['SCHEDULED', 'ONGOING'])
+      .order('scheduled_at', { ascending: true });
+
+    // 3. Filter by Driver if provided
+    if (driverId) {
+      query = query.eq('driver_id', driverId);
+    }
+
+    const { data: trips, error: fetchError } = await query;
 
     if (fetchError) {
-      console.error('Upcoming trips query error:', fetchError);
-      return res
-        .status(500)
-        .json({ success: false, message: 'Database error occurred while fetching schedules.' });
+      console.error('Daily journeys query error:', fetchError);
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Database error occurred while fetching journeys.' 
+      });
     }
 
     return res.status(200).json({
       success: true,
-      message: `Found ${trips.length} scheduled trips for today.`,
-      data: trips,
+      message: `Found ${trips.length} journeys for ${targetDate.toDateString()}.`,
+      data: trips, // Flutter app expects this list
     });
   } catch (error) {
-    console.error('Upcoming trips error:', error.message);
+    console.error('Daily journeys error:', error.message);
     return res.status(500).json({
       success: false,
-      message: 'An internal server error occurred while fetching trips.',
+      message: 'An internal server error occurred.',
     });
   }
 };
-
 // --- GET /passenger/history/:userId --------------------------------------
 // Completed trips for this passenger, most recent first. Combines boardings
 // with the owning active_journey + route so the client doesn't need to stitch.
