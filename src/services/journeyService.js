@@ -143,23 +143,27 @@ const getRouteWithCache = async (actJouId) => {
 //   Accepts ?day=<dart weekday 1..7> (Mon..Sun). Returns active recurring
 //   schedules for that postgres day (Sun=0..Sat=6).
 // ---------------------------------------------------------------------------
+// --- GET /api/journeys/upcoming -------------------------------------------
 const getUpcomingTrips = async (req, res) => {
-  logLine('scheduler', `fetch-all-trips incoming query=${JSON.stringify(req.query)}`);
+  logLine('scheduler', `fetch-trips incoming query=${JSON.stringify(req.query)}`);
+  
   try {
+    const { day, driverId } = req.query; // ✨ Added driverId to destructuring
     let targetDayPostgres;
 
-    if (req.query.day) {
-      const dartDay = parseInt(req.query.day, 10);
+    // Day Logic: Dart (1-7) to Postgres (0-6)
+    if (day) {
+      const dartDay = parseInt(day, 10);
       if (Number.isNaN(dartDay) || dartDay < 1 || dartDay > 7) {
-        return res.status(400).json({ success: false, message: 'Invalid day parameter. Must be 1-7.' });
+        return res.status(400).json({ success: false, message: 'Invalid day parameter.' });
       }
-      // Dart: Mon=1..Sun=7 → Postgres: Sun=0..Sat=6
       targetDayPostgres = dartDay === 7 ? 0 : dartDay;
     } else {
       targetDayPostgres = new Date().getUTCDay();
     }
 
-    const { data: trips, error: fetchError } = await supabaseAdmin
+    // 1. Initialize the query
+    let query = supabaseAdmin
       .from('recurring_schedules')
       .select(`
         schedule_id,
@@ -172,23 +176,29 @@ const getUpcomingTrips = async (req, res) => {
           fare,
           route_structure (
             stop_order,
-            bus_stops (
-              bus_stop_name
-            )
+            bus_stops (bus_stop_name)
           )
         )
       `)
       .eq('day_of_week', targetDayPostgres)
-      .eq('is_active', true)
-      .order('departure_time', { ascending: true });
+      .eq('is_active', true);
+
+    // 2. ✨ THE FILTER: If driverId is passed, restrict rows to that driver
+    if (driverId && driverId !== 'null' && driverId !== '') {
+      query = query.eq('driver_id', driverId);
+    }
+
+    // 3. Execute
+    const { data: trips, error: fetchError } = await query.order('departure_time', { ascending: true });
 
     if (fetchError) {
       console.error('Upcoming trips fetch error:', fetchError);
       return res.status(500).json({ success: false, message: 'Database error fetching schedules.' });
     }
 
-    logLine('scheduler', `fetch-all-trips ok rows=${(trips || []).length} dayPg=${targetDayPostgres}`);
+    logLine('scheduler', `fetch-trips ok rows=${(trips || []).length} driverFilter=${driverId || 'none'}`);
     return res.status(200).json({ success: true, data: trips });
+
   } catch (error) {
     console.error('Upcoming trips unexpected error:', error.message);
     return res.status(500).json({ success: false, message: 'Internal server error.' });
