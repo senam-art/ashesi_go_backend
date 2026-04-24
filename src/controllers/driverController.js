@@ -250,9 +250,9 @@ const getRouteData = async (req, res) => {
   const { actJouId } = req.body;
   try {
     const { data: activeJourneyData, error: ajError } = await supabaseAdmin
-      .from('active_journeys')
-      .select('act_jou_id,route_id,routes(route_name)')
-      .eq('act_jou_id', actJouId)
+      .from('journeys')
+      .select('journey_id,route_id,routes(route_name)')
+      .eq('journey_id', actJouId)
       .single();
 
     if (ajError || !activeJourneyData) {
@@ -393,23 +393,33 @@ const getTodaySchedule = async (req, res) => {
 // recordArrival: shared body for legacy recordStopVisit + record-action ARRIVE
 // ---------------------------------------------------------------------------
 const recordArrival = async ({ actJouId, stopId }) => {
-  // 1. Fetch Journey AND explicitly include route_id
+  console.log(`[DEBUG] Attempting recordArrival for Journey: ${actJouId}`);
+
+  // 1. Fetch Journey (Naked query - no joins to avoid RLS/Join errors)
   const { data: journey, error: jError } = await supabaseAdmin
     .from('journeys')
-    .select(`
-      journey_id, 
-      route_id, -- ✨ CRITICAL: This was missing!
-      routes (route_name)
-    `)
+    .select('journey_id, route_id')
     .eq('journey_id', actJouId)
     .single();
 
-  if (jError || !journey) throw new Error('Active journey not found.');
+  // If this fails, we log the EXACT error from Supabase
+  if (jError || !journey) {
+    console.error('[DEBUG] Supabase Fetch Error:', jError);
+    throw new Error(`Active journey not found. (ID: ${actJouId})`);
+  }
 
   const routeId = journey.route_id;
-  const routeName = journey.routes?.route_name || 'Unknown Route';
 
-  // 2. Validate the stop exists on THIS specific route
+  // 2. Fetch Route Metadata separately
+  const { data: routeData } = await supabaseAdmin
+    .from('routes')
+    .select('route_name')
+    .eq('id', routeId)
+    .single();
+    
+  const routeName = routeData?.route_name || 'Unknown Route';
+
+  // 3. Validate Stop in Route Structure
   const { data: struct, error: sError } = await supabaseAdmin
     .from('route_structure')
     .select(`
@@ -417,35 +427,30 @@ const recordArrival = async ({ actJouId, stopId }) => {
       scheduled_arrival, 
       bus_stops (bus_stop_name)
     `)
-    .eq('route_id', routeId) // Now routeId actually has a value
+    .eq('route_id', routeId)
     .eq('bus_stop_id', stopId)
     .single();
 
   if (sError || !struct) {
-    console.error(`Stop Check Failed: Route ${routeId}, Stop ${stopId}`);
+    console.error(`[DEBUG] Stop Check Failed. Route: ${routeId}, Stop: ${stopId}`);
     throw new Error("This stop is not part of this route's structure.");
   }
 
-  const stopOrder = struct.stop_order;
-  const scheduledArrival = struct.scheduled_arrival;
-  const stopName = struct.bus_stops.bus_stop_name;
+  const { stop_order: stopOrder, scheduled_arrival: scheduledArrival } = struct;
+  const stopName = struct.bus_stops?.bus_stop_name || 'Unknown Stop';
 
-  // 3. Simple delay logic (10-minute threshold)
+  // 4. Time/Delay Logic
+  const nowIso = new Date().toISOString();
   let isDelayed = false;
   if (scheduledArrival) {
-    const nowTime = new Date();
     const [hours, minutes] = scheduledArrival.split(':');
     const scheduled = new Date();
     scheduled.setHours(parseInt(hours, 10), parseInt(minutes, 10), 0);
-    
-    // If current time is 10+ mins past scheduled arrival
-    isDelayed = (nowTime.getTime() - scheduled.getTime()) > 10 * 60 * 1000;
+    isDelayed = (Date.now() - scheduled.getTime()) > 10 * 60 * 1000;
   }
 
-  const nowIso = new Date().toISOString();
-
-  // 4. Log the visit for history/analytics
-  const { data: visit, error: visitError } = await supabaseAdmin
+  // 5. Log the Visit
+  const { error: visitError } = await supabaseAdmin
     .from('stop_visit_summaries')
     .insert([{
       active_journey_id: actJouId,
@@ -455,14 +460,11 @@ const recordArrival = async ({ actJouId, stopId }) => {
       route_id: routeId,
       route_name: routeName,
       stop_name: stopName,
-    }])
-    .select()
-    .single();
+    }]);
 
   if (visitError) throw visitError;
 
-  // 5. Update the LIVE STATE (Option 3 style)
-  // We update active_journey_states so the map/timeline reflects the progress
+  // 6. Update LIVE STATE (active_journey_states)
   await supabaseAdmin
     .from('active_journey_states')
     .update({ 
@@ -471,7 +473,7 @@ const recordArrival = async ({ actJouId, stopId }) => {
     })
     .eq('journey_id', actJouId);
 
-  return { visit, stopName };
+  return { stopName };
 };
 
 // --- POST /driver/journey/record-stop  (legacy, kept for back-compat) -----
